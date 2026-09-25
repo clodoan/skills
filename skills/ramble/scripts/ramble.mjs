@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, realpathSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -134,30 +134,83 @@ function renderThumbs(routes, opts) {
   return rows;
 }
 
+// ------------------------------------------------------------ fs walking
+
+// Sorted by code point so output is identical on APFS (sorted) and ext4
+// (hash order). Unreadable directories are skipped, not fatal.
+function readdirSorted(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** "dir" | "file" | null, following symlinks; broken links are null. */
+function entryKind(full, entry) {
+  if (!entry.isSymbolicLink()) return entry.isDirectory() ? "dir" : entry.isFile() ? "file" : null;
+  try {
+    const st = statSync(full);
+    return st.isDirectory() ? "dir" : st.isFile() ? "file" : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True the first time a directory's real path is seen (symlink-loop guard). */
+function firstVisit(visited, dir) {
+  let real;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    return false;
+  }
+  if (visited.has(real)) return false;
+  visited.add(real);
+  return true;
+}
+
+// Scans never follow directory symlinks; router walks do, with a guard.
 function* walkDirs(dir) {
   yield dir;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of readdirSorted(dir)) {
     if (!entry.isDirectory() || PRUNE_DIRS.has(entry.name)) continue;
     yield* walkDirs(path.join(dir, entry.name));
   }
 }
 
 function* walkFiles(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of readdirSorted(dir)) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (!PRUNE_DIRS.has(entry.name)) yield* walkFiles(full);
-    } else if (SOURCE_EXT_RE.test(entry.name)) {
+    } else if (SOURCE_EXT_RE.test(entry.name) && entryKind(full, entry) === "file") {
       yield full;
     }
   }
+}
+
+const textCache = new Map();
+function readText(file) {
+  if (!textCache.has(file)) {
+    let text = "";
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      // unreadable: treated as empty
+    }
+    textCache.set(file, text);
+  }
+  return textCache.get(file);
 }
 
 // ---------------------------------------------------------------- roots
 
 function hasPageFileBelow(dir, depth = 0) {
   if (depth > 8) return false;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of readdirSorted(dir)) {
     if (entry.isFile() && PAGE_RE.test(entry.name)) return true;
     if (entry.isDirectory() && !PRUNE_DIRS.has(entry.name)) {
       if (hasPageFileBelow(path.join(dir, entry.name), depth + 1)) return true;
@@ -179,7 +232,7 @@ function detectRoots(root) {
       const parentDir = path.dirname(dir);
       const anchor = path.basename(parentDir) === "src" ? path.dirname(parentDir) : parentDir;
       if (!existsSync(path.join(anchor, "package.json"))) continue;
-      const hasPages = readdirSync(dir, { withFileTypes: true }).some(
+      const hasPages = readdirSorted(dir).some(
         (e) => (e.isFile() && PAGES_EXT_RE.test(e.name)) || (e.isDirectory() && !PRUNE_DIRS.has(e.name)),
       );
       if (hasPages) roots.push({ kind: "next-pages", dir });
@@ -188,7 +241,7 @@ function detectRoots(root) {
   // React Router: files that define routes.
   const rrFiles = [];
   for (const file of walkFiles(root)) {
-    const text = readFileSync(file, "utf8");
+    const text = readText(file);
     if (/createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes\s*\(/.test(text)) {
       rrFiles.push(file);
     }
@@ -211,23 +264,14 @@ function walkAppRouter(appDir, appLabel) {
   const slots = [];
   const intercepts = [];
   let apiRoutes = 0;
+  const visited = new Set();
 
   const recurse = (dir, urlSegs, groups, inSlot, host) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!firstVisit(visited, dir)) return;
+    for (const entry of readdirSorted(dir)) {
       const full = path.join(dir, entry.name);
-      // Symlinks (e.g. dub's (ee)/LICENSE.md) must not be recursed as dirs.
-      let isDir = entry.isDirectory();
-      let isFile = entry.isFile();
-      if (entry.isSymbolicLink()) {
-        try {
-          const st = statSync(full);
-          isDir = st.isDirectory();
-          isFile = st.isFile();
-        } catch {
-          continue;
-        }
-      }
-      if (isFile) {
+      const kind = entryKind(full, entry);
+      if (kind === "file") {
         if (PAGE_RE.test(entry.name)) {
           const urlPath = "/" + urlSegs.join("/");
           if (inSlot) {
@@ -241,12 +285,14 @@ function walkAppRouter(appDir, appLabel) {
               dynamic: urlSegs.some((s) => s.startsWith(":")),
             });
           }
-        } else if (/^route\.(js|ts)$/.test(entry.name)) {
+        } else if (/^route\.(js|jsx|ts|tsx)$/.test(entry.name)) {
           apiRoutes += 1;
         }
         continue;
       }
-      if (!isDir || PRUNE_DIRS.has(entry.name)) continue;
+      // Inside a router every folder is a segment ("build", "public", …);
+      // only node_modules is skipped.
+      if (kind !== "dir" || entry.name === "node_modules") continue;
       const name = entry.name;
       if (name.startsWith("_")) continue; // private folder
       if (name.startsWith("@")) {
@@ -282,20 +328,27 @@ function walkAppRouter(appDir, appLabel) {
 
 // ----------------------------------------------------- next pages router
 
+const PAGES_SPECIAL = new Set(["_app", "_document", "_error", "_middleware", "404", "500"]);
+
 function walkPagesRouter(pagesDir, appLabel) {
   const routes = [];
+  const visited = new Set();
   const recurse = (dir, urlSegs) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!firstVisit(visited, dir)) return;
+    for (const entry of readdirSorted(dir)) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!PRUNE_DIRS.has(entry.name) && entry.name !== "api") {
+      const kind = entryKind(full, entry);
+      if (kind === "dir") {
+        // Only the top-level pages/api is API; pages/docs/api/ is a page.
+        const isApi = urlSegs.length === 0 && entry.name === "api";
+        if (entry.name !== "node_modules" && !isApi) {
           recurse(full, [...urlSegs, segmentToUrl(entry.name)]);
         }
         continue;
       }
-      if (!PAGES_EXT_RE.test(entry.name)) continue;
+      if (kind !== "file" || !PAGES_EXT_RE.test(entry.name) || entry.name.endsWith(".d.ts")) continue;
       const base = entry.name.replace(PAGES_EXT_RE, "");
-      if (["_app", "_document", "_error", "404", "500"].includes(base)) continue;
+      if (PAGES_SPECIAL.has(base)) continue;
       const segs = base === "index" ? urlSegs : [...urlSegs, segmentToUrl(base)];
       const urlPath = "/" + segs.join("/");
       routes.push({
@@ -377,7 +430,7 @@ function makeChainResolver(allFiles) {
     if (configCache.has(ident)) return configCache.get(ident);
     let found = null;
     for (const file of allFiles) {
-      const text = readFileSync(file, "utf8");
+      const text = readText(file);
       const m = text.match(new RegExp(`(?:export\\s+)?const\\s+${ident}\\s*(?:=|:[^=]*=)\\s*`));
       if (!m) continue;
       const braceIdx = text.indexOf("{", m.index + m[0].length - 1);
@@ -412,7 +465,7 @@ function parseReactRouter(files, appLabel, resolveChain) {
   const unresolvedPaths = [];
   const seen = new Set();
   for (const file of files) {
-    const text = readFileSync(file, "utf8");
+    const text = readText(file);
     const stack = []; // { depth, path }
     let depth = 0;
     const re = /\{|\}|path\s*:\s*(["'`])((?:(?!\1).)*)\1|path\s*:\s*([\w$][\w$.]+)|<Route[^>]*\spath=(["'])((?:(?!\4).)*)\4/g;
@@ -539,7 +592,7 @@ function collectEdges({ rootDir, routes, includeShared }) {
   const seen = new Set();
 
   for (const file of walkFiles(rootDir)) {
-    const text = readFileSync(file, "utf8");
+    const text = readText(file);
     const isMiddleware = /(^|\/)middleware\.(js|ts)$/.test(file);
     const source = isMiddleware ? "middleware" : sourceRouteFor(file);
     if (!source && !includeShared && !isMiddleware) {
@@ -587,7 +640,7 @@ function collectConfigRedirects(rootDir, routes) {
   for (const name of ["next.config.js", "next.config.mjs", "next.config.ts"]) {
     const file = path.join(rootDir, name);
     if (!existsSync(file)) continue;
-    const text = readFileSync(file, "utf8");
+    const text = readText(file);
     const re = /source\s*:\s*["'`]([^"'`]+)["'`][\s\S]{0,200}?destination\s*:\s*["'`]([^"'`]+)["'`]/g;
     let m;
     while ((m = re.exec(text))) {
@@ -707,7 +760,9 @@ function main() {
     const key = `${r.app}:${r.urlPath}`;
     if (!dedup.has(key)) dedup.set(key, r);
   }
-  const finalRoutes = [...dedup.values()];
+  const appOrder = [...new Set(routes.map((r) => r.app))];
+  const finalRoutes = [...dedup.values()].sort((a, b) =>
+    appOrder.indexOf(a.app) - appOrder.indexOf(b.app) || (a.urlPath < b.urlPath ? -1 : a.urlPath > b.urlPath ? 1 : 0));
 
   const { edges, unresolved, external } = collectEdges({
     rootDir, routes: finalRoutes, includeShared: opts.includeShared,

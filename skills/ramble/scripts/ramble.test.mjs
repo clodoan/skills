@@ -1,7 +1,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,19 @@ function runRamble(root, args = []) {
     try { return readFileSync(path.join(out, f), "utf8"); } catch { return ""; }
   };
   return { code: res.status, out: res.stdout + res.stderr, mmd: read("flow.mmd"), md: read("flow.md") };
+}
+
+/** Node labels and edges ("from -kind-> to", by label) of a flow.mmd. */
+function graph(mmd) {
+  const labels = new Map();
+  for (const m of mmd.matchAll(/^\s*(\w+)(?:\["(.*)"\]|\{\{"(.*)"\}\})\s*$/gm)) labels.set(m[1], m[2] ?? m[3]);
+  const edges = [];
+  const re = /^\s*(\w+) (?:-->|-\. (\w+) \.->|-\.->\|"([^"]*)"\|)\s*(\w+)\s*$/gm;
+  for (const m of mmd.matchAll(re)) {
+    const kind = m[2] ?? (m[3] !== undefined ? m[3] : "link");
+    edges.push(`${labels.get(m[1])} -${kind}-> ${labels.get(m[4])}`);
+  }
+  return { labels: [...labels.values()], edges };
 }
 
 test("next app router: groups, dynamic, catch-alls, slots, intercepts, privates", () => {
@@ -239,4 +252,58 @@ test("--thumbs without --base-url is a usage error", () => {
   const res = spawnSync(process.execPath, [CLI, root, "--thumbs"], { encoding: "utf8" });
   assert.equal(res.status, 2);
   assert.match(res.stdout + res.stderr, /--thumbs requires --base-url/);
+});
+
+test("route folders named like build output (build, public, static…) are still routes", () => {
+  const files = { "package.json": "{}", "app/page.tsx": "x" };
+  for (const d of ["build", "out", "public", "static", "dist", "coverage"]) files[`app/${d}/page.tsx`] = "x";
+  const { code, mmd } = runRamble(makeApp("prunednames", files));
+  assert.equal(code, 0);
+  for (const d of ["build", "out", "public", "static", "dist", "coverage"]) {
+    assert.ok(graph(mmd).labels.includes(`/${d}`), `/${d} dropped`);
+  }
+});
+
+test("a symlinked directory loop in the route tree is walked once", () => {
+  const root = makeApp("dirloop", { "package.json": "{}", "app/page.tsx": "x", "app/a/page.tsx": "x" });
+  symlinkSync("..", path.join(root, "app", "a", "loop"));
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels.sort(), ["/", "/a"]);
+  assert.match(md, /Screens:\*\* 2 /);
+});
+
+test("broken symlinks and unreadable directories do not crash the scan", () => {
+  const root = makeApp("broken", { "package.json": "{}", "app/page.tsx": "x", "src/locked/a.ts": "x" });
+  symlinkSync("./nope.ts", path.join(root, "broken.ts"));
+  symlinkSync("./nope", path.join(root, "app", "gone"));
+  chmodSync(path.join(root, "src", "locked"), 0o000);
+  try {
+    const { code, out, mmd } = runRamble(root);
+    assert.equal(code, 0, out);
+    assert.deepEqual(graph(mmd).labels, ["/"]);
+  } finally {
+    chmodSync(path.join(root, "src", "locked"), 0o755);
+  }
+});
+
+test("pages router: only top-level pages/api is API; .d.ts and _middleware are not pages", () => {
+  const root = makeApp("pagesapi", {
+    "package.json": `{"dependencies":{"next":"15"}}`,
+    "pages/index.tsx": "x",
+    "pages/api/hello.ts": "x",
+    "pages/docs/api/intro.tsx": "x",
+    "pages/types.d.ts": "x",
+    "pages/_middleware.ts": "x",
+  });
+  const { code, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels.sort(), ["/", "/docs/api/intro"]);
+});
+
+test("node ids follow sorted route paths, independent of filesystem order", () => {
+  const root = makeApp("order", { "package.json": "{}", "app/page.tsx": "x", "app/zeta/page.tsx": "x", "app/alpha/page.tsx": "x" });
+  const { mmd } = runRamble(root);
+  const ids = [...mmd.matchAll(/^\s*(r\d+)\["(.*)"\]$/gm)].map((m) => `${m[1]}=${m[2]}`);
+  assert.deepEqual(ids, ["r0=/", "r1=/alpha", "r2=/zeta"]);
 });
