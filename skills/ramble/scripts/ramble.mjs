@@ -219,33 +219,42 @@ function hasPageFileBelow(dir, depth = 0) {
   return false;
 }
 
+const NEXT_CONFIG_NAMES = ["next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts", "next.config.mts"];
+
+/** A Next router folder's project: its parent (or src/'s parent) holding package.json. */
+function nextProjectFor(routerDir) {
+  const parent = path.dirname(routerDir);
+  const project = path.basename(parent) === "src" ? path.dirname(parent) : parent;
+  return existsSync(path.join(project, "package.json")) ? project : null;
+}
+
+function dependsOnNext(project) {
+  if (NEXT_CONFIG_NAMES.some((name) => existsSync(path.join(project, name)))) return true;
+  try {
+    const pkg = JSON.parse(readText(path.join(project, "package.json")));
+    return Boolean(pkg.dependencies?.next ?? pkg.devDependencies?.next);
+  } catch {
+    return false;
+  }
+}
+
+const RR_DEFINES_ROUTES = /createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes\s*\(|<Routes[\s>]|<Route\s[^>]*\bpath=/;
+
 function detectRoots(root) {
   const roots = [];
   for (const dir of walkDirs(root)) {
     const base = path.basename(dir);
-    const parent = path.basename(path.dirname(dir));
-    if (base === "app" && parent !== "pages" && hasPageFileBelow(dir)) {
-      roots.push({ kind: "next-app", dir });
-    } else if (base === "pages" && !dir.includes(`${path.sep}app${path.sep}`)) {
-      // A real Next.js pages/ root sits next to package.json (or inside
-      // src/ next to one) — content folders named "pages" (MDX etc.) don't.
-      const parentDir = path.dirname(dir);
-      const anchor = path.basename(parentDir) === "src" ? path.dirname(parentDir) : parentDir;
-      if (!existsSync(path.join(anchor, "package.json"))) continue;
-      const hasPages = readdirSorted(dir).some(
-        (e) => (e.isFile() && PAGES_EXT_RE.test(e.name)) || (e.isDirectory() && !PRUNE_DIRS.has(e.name)),
-      );
-      if (hasPages) roots.push({ kind: "next-pages", dir });
-    }
+    if (base !== "app" && base !== "pages") continue;
+    // app/ or pages/ inside a detected router is a route segment.
+    if (roots.some((r) => dir.startsWith(r.dir + path.sep))) continue;
+    // Real routers sit next to package.json (or in src/ next to one);
+    // pages/ also needs Next itself — Vite apps keep components in src/pages.
+    const project = nextProjectFor(dir);
+    if (!project) continue;
+    if (base === "app" && hasPageFileBelow(dir)) roots.push({ kind: "next-app", dir, project });
+    if (base === "pages" && dependsOnNext(project)) roots.push({ kind: "next-pages", dir, project });
   }
-  // React Router: files that define routes.
-  const rrFiles = [];
-  for (const file of walkFiles(root)) {
-    const text = readText(file);
-    if (/createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes\s*\(/.test(text)) {
-      rrFiles.push(file);
-    }
-  }
+  const rrFiles = [...walkFiles(root)].filter((file) => RR_DEFINES_ROUTES.test(readText(file)));
   if (rrFiles.length) roots.push({ kind: "react-router", files: rrFiles });
   return roots;
 }
@@ -253,11 +262,17 @@ function detectRoots(root) {
 // ------------------------------------------------------- next app router
 
 function segmentToUrl(seg) {
+  if (seg.startsWith("%5F")) return `_${seg.slice(3)}`; // Next's escape for a literal leading _
   if (/^\[\[\.\.\.(.+)\]\]$/.test(seg)) return `:${seg.slice(5, -2)}*?`;
   if (/^\[\.\.\.(.+)\]$/.test(seg)) return `:${seg.slice(4, -1)}*`;
   if (/^\[(.+)\]$/.test(seg)) return `:${seg.slice(1, -1)}`;
   return seg;
 }
+
+// Dotted names ending in a letter TLD (app.dub.co), not versions (v1.0)
+// or file-like route handlers (feed.xml).
+const HOST_DIR_RE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i;
+const NOT_A_TLD_RE = /\.(xml|txt|json|js|ts|html|ico|png|svg|jpg|webmanifest|rss|atom|md)$/i;
 
 function walkAppRouter(appDir, appLabel) {
   const routes = [];
@@ -315,7 +330,7 @@ function walkAppRouter(appDir, appLabel) {
       }
       // Host-based top-level folders (dub-style multi-tenant: app/app.dub.co/…)
       // are routing domains, not URL segments.
-      if (urlSegs.length === 0 && !host && name.includes(".") && !name.startsWith("[")) {
+      if (urlSegs.length === 0 && !host && HOST_DIR_RE.test(name) && !NOT_A_TLD_RE.test(name)) {
         recurse(full, urlSegs, groups, inSlot, name);
         continue;
       }
@@ -742,7 +757,9 @@ function main() {
       intercepts = intercepts.concat(res.intercepts);
       apiRoutes += res.apiRoutes;
     } else if (r.kind === "next-pages") {
-      routes.push(...walkPagesRouter(r.dir, path.relative(rootDir, r.dir) || "pages"));
+      const pages = walkPagesRouter(r.dir, path.relative(rootDir, r.dir) || "pages");
+      if (pages.length === 0) r.empty = true; // e.g. only pages/api
+      routes.push(...pages);
     } else if (r.kind === "react-router") {
       const allFiles = [...walkFiles(rootDir)];
       const res = parseReactRouter(r.files, "react-router", makeChainResolver(allFiles));
@@ -774,7 +791,7 @@ function main() {
 
   const report = `## Ramble report
 
-- **Routers:** ${roots.map((r) => r.kind + (r.dir ? ` (${path.relative(rootDir, r.dir)})` : "")).join(", ")}
+- **Routers:** ${roots.filter((r) => !r.empty).map((r) => r.kind + (r.dir ? ` (${path.relative(rootDir, r.dir)})` : "")).join(", ")}
 - **Screens:** ${finalRoutes.length} (${finalRoutes.filter((r) => r.dynamic).length} dynamic)${routes.length !== finalRoutes.length ? ` — ${routes.length - finalRoutes.length} duplicate URL(s) merged` : ""}
 - **Edges:** ${edges.length} (${edges.filter((e) => e.kind !== "link").length} redirect/middleware)
 - **API route handlers (not screens):** ${apiRoutes}

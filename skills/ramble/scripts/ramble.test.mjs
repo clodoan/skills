@@ -98,7 +98,7 @@ test("edge targets resolve template literals against dynamic routes", () => {
 
 test("next pages router: index, nested, dynamic; _app and api excluded", () => {
   const root = makeApp("nextpages", {
-    "package.json": "{}",
+    "package.json": `{"dependencies":{"next":"15"}}`,
     "pages/index.tsx": "export default () => null",
     "pages/about.tsx": "export default () => null",
     "pages/blog/[slug].tsx": "export default () => null",
@@ -306,4 +306,55 @@ test("node ids follow sorted route paths, independent of filesystem order", () =
   const { mmd } = runRamble(root);
   const ids = [...mmd.matchAll(/^\s*(r\d+)\["(.*)"\]$/gm)].map((m) => `${m[1]}=${m[2]}`);
   assert.deepEqual(ids, ["r0=/", "r1=/alpha", "r2=/zeta"]);
+});
+
+test("a project inside a folder named app still gets its pages router", () => {
+  const root = makeApp("app/proj", { "package.json": `{"dependencies":{"next":"15"}}`, "pages/index.tsx": "x", "pages/about.tsx": "x" });
+  const { code, out, mmd } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).labels, ["/", "/about"]);
+});
+
+test("a route folder named app is a segment, not a second router", () => {
+  const root = makeApp("nestedapp", { "package.json": "{}", "app/page.tsx": "x", "app/app/page.tsx": "x", "app/app/settings/page.tsx": "x" });
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.match(md, /Routers:\*\* next-app \(app\)\n/);
+  assert.deepEqual(graph(mmd).labels, ["/", "/app", "/app/settings"]);
+});
+
+test("a Vite app's src/pages components folder is not a Next pages router", () => {
+  const root = makeApp("vitepages", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/main.tsx": `createBrowserRouter([{ path: "/" }, { path: "/about" }]);`,
+    "src/pages/Home.tsx": "x",
+    "src/pages/About.tsx": "x",
+  });
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.ok(!md.includes("next-pages"), md);
+  assert.deepEqual(graph(mmd).labels, ["/", "/about"]);
+});
+
+test("a pages/ folder holding only api/ is not reported as a router", () => {
+  const root = makeApp("apionly", { "package.json": `{"dependencies":{"next":"15"}}`, "app/page.tsx": "x", "pages/api/auth.ts": "x" });
+  const { md } = runRamble(root);
+  assert.match(md, /Routers:\*\* next-app \(app\)\n/);
+});
+
+test("dotted top-level folders are segments unless they look like hosts; %5F escapes _", () => {
+  const root = makeApp("dotted", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/v1.0/page.tsx": "x",
+    "app/feed.xml/route.ts": "x",
+    "app/%5Finternal/page.tsx": "x",
+    "app/app.example.com/dashboard/page.tsx": "x",
+  });
+  const { code, mmd, md } = runRamble(root);
+  assert.equal(code, 0);
+  assert.ok(mmd.includes('["/v1.0"]'), "version folder treated as a host");
+  assert.ok(mmd.includes('["/_internal"]'));
+  assert.match(mmd, /subgraph \w+\["app · app\.example\.com"\]/);
+  assert.match(md, /API route handlers[^\n]*:\*\* 1/);
 });
