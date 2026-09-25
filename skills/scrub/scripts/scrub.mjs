@@ -16,6 +16,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const EXIT_OK = 0;
 const EXIT_ERR = 2;
@@ -329,35 +330,27 @@ function computeCrop(union, pad, meta) {
   return { x, y, w, h, scale };
 }
 
-// Pick which normalized frames appear on dense sheets.
-// Short clips: every frame. Medium: uniform stride. Long: the frames
-// with the most pixel change (motion peaks), in chronological order.
-function pickDenseFrames(start, end, table, maxFrames) {
-  const all = [];
-  for (let f = start; f <= end; f++) all.push(f);
-  if (all.length <= maxFrames) return { frames: all, strategy: "every frame" };
-
-  if (all.length <= maxFrames * 3) {
-    const stride = Math.ceil(all.length / maxFrames);
-    const frames = all.filter((_, i) => i % stride === 0);
-    if (frames.at(-1) !== end) frames.push(end);
-    return { frames, strategy: `every ${stride}th frame` };
+// Pick which normalized frames appear on dense sheets: every frame when
+// they fit, otherwise maxFrames evenly spaced frames spanning the window.
+function pickDenseFrames(start, end, maxFrames) {
+  const count = end - start + 1;
+  if (count <= maxFrames) {
+    return { frames: Array.from({ length: count }, (_, i) => start + i), strategy: "every frame" };
   }
-
-  const byChange = table
-    .filter((r) => r.frame >= start && r.frame <= end)
-    .sort((a, b) => b.changedPx - a.changedPx)
-    .slice(0, maxFrames - 2)
-    .map((r) => r.frame);
-  const frames = [...new Set([start, ...byChange, end])].sort((a, b) => a - b);
-  return { frames, strategy: "motion peaks (highest changed-pixel frames)" };
+  const step = (count - 1) / Math.max(1, maxFrames - 1);
+  const frames = [...new Set(Array.from({ length: maxFrames }, (_, i) => start + Math.round(i * step)))];
+  return { frames, strategy: `evenly spaced, about every ${step.toFixed(1)} frames` };
 }
 
-function drawtextFilter(labelExpr, fontsize, stamps) {
-  if (!stamps) return "null";
+export function stampFontsize(cellW) {
+  return Math.min(36, Math.max(12, Math.round(cellW / 20)));
+}
+
+// Stamps "f<frame> <ms>ms" from the frame index; ms rounds like motion.csv.
+export function stampFilter(frameExpr, fontsize, fps) {
   return (
-    `drawtext=text='f%{eif\\:${labelExpr}\\:d} %{eif\\:t*1000\\:d}ms':` +
-    `x=6:y=h-th-6:fontsize=${fontsize}:fontcolor=white:box=1:boxcolor=black@0.55`
+    `drawtext=text='f%{eif\\:${frameExpr}\\:d} %{eif\\:round((${frameExpr})*1000/${fps})\\:d}ms':` +
+    `x=6:y=h-th-6:fontsize=${fontsize}:fontcolor=white:box=1:boxcolor=black`
   );
 }
 
@@ -376,10 +369,10 @@ function renderGraph(outDir, graph, output) {
   ], outDir);
 }
 
-function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFrames, stamps }) {
+function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFrames, stamps, fps }) {
   const { start, end } = motion;
+  const stamp = (frameExpr, cellW) => (stamps ? stampFilter(frameExpr, stampFontsize(cellW), fps) : "null");
   const cellW = crop ? crop.w * crop.scale : meta.width;
-  const fontsize = Math.min(36, Math.max(12, Math.round(cellW / 20)));
   const tile = `tile=${grid}x${grid}:padding=2:margin=2:color=0x101010`;
   const cropChain = crop
     ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` +
@@ -395,27 +388,27 @@ function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFram
       Math.round((i * (totalFrames - 1)) / Math.max(1, overviewCount - 1))),
   )];
   renderGraph(outDir,
-    `${drawtextFilter("n", Math.max(12, Math.round(meta.width / 40)), stamps)},${selectExpr(overviewFrames)},${tile}`,
+    `${stamp("n", meta.width)},${selectExpr(overviewFrames)},${tile}`,
     "overview.png");
 
-  const sheets = { overview: overviewFrames, dense: denseFrames, diff: [] };
+  const sheets = { overview: overviewFrames, dense: denseFrames };
   if (denseFrames.length === 0) return sheets;
 
   // Dense sheets: trimmed + cropped active window.
   const rel = denseFrames.map((f) => f - start);
   renderGraph(outDir,
-    `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}${drawtextFilter(`n+${start}`, fontsize, stamps)},${selectExpr(rel)},${tile}`,
+    `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}${stamp(`n+${start}`, cellW)},${selectExpr(rel)},${tile}`,
     path.join("sheets", "sheet-%02d.png"));
 
-  // Difference sheets: same window; diff frame k = change INTO frame start+k+1.
-  sheets.diff = denseFrames.filter((f) => f > start);
-  const relDiff = sheets.diff.map((f) => f - start - 1);
-  if (relDiff.length > 0) {
-    renderGraph(outDir,
-      `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}format=gray,tblend=all_mode=difference,` +
-      `lut=y=min(val*4\\,255),${drawtextFilter(`n+${start}+1`, fontsize, stamps)},${selectExpr(relDiff)},${tile}`,
-      path.join("sheets", "diff-%02d.png"));
-  }
+  // Difference sheets, cell for cell with the dense sheets: diff frame k is
+  // the change INTO frame start+k. Trimming from start-1 supplies the
+  // predecessor; at frame 0 a cloned frame 0 yields a black cell.
+  const head = start > 0 ? `trim=start_frame=${start - 1}:end_frame=${end + 1},` :
+    `trim=start_frame=0:end_frame=${end + 1},tpad=start=1:start_mode=clone,`;
+  renderGraph(outDir,
+    `${head}${cropChain}format=gray,tblend=all_mode=difference,` +
+    `lut=y=min(val*4\\,255),${stamp(`n+${start}`, cellW)},${selectExpr(rel)},${tile}`,
+    path.join("sheets", "diff-%02d.png"));
   return sheets;
 }
 
@@ -425,13 +418,12 @@ function sheetFrameList(sheets, grid, ms) {
   const lines = [];
   const add = (name, frames) => {
     for (let i = 0; i * cells < frames.length; i++) {
-      const label = name.includes("%") ? name.replace("%", String(i + 1).padStart(2, "0")) : name;
+      const label = name.replaceAll("%", String(i + 1).padStart(2, "0"));
       lines.push(`- \`${label}\`: ${frames.slice(i * cells, (i + 1) * cells).map((f) => `f${f} ${ms(f)}ms`).join(", ")}`);
     }
   };
   add("overview.png", sheets.overview);
-  add("sheets/sheet-%.png", sheets.dense);
-  add("sheets/diff-%.png", sheets.diff);
+  add("sheets/sheet-%.png (and diff-%.png)", sheets.dense);
   return lines.join("\n");
 }
 
@@ -526,7 +518,7 @@ function writeIndex(ctx) {
 
 Read this file top to bottom, then open the contact sheets it lists.
 All frame numbers and milliseconds refer to the normalized clip
-(\`work/normalized.mp4\`, constant ${fps} fps) — frame N = ${Math.round(1000 / fps)}·N ms.
+(\`work/normalized.mp4\`, constant ${fps} fps): frame N = N·1000/${fps} ms, rounded.
 
 ## Metadata
 
@@ -545,7 +537,7 @@ ${noMotion ? "**No motion detected** above the noise floor. The clip appears sta
 
 - \`overview.png\` — ${Math.min(opts.grid * opts.grid, totalFrames)} frames sampled evenly across the whole clip, uncropped
 - \`sheets/sheet-*.png\` — dense ${opts.grid}×${opts.grid} contact sheets of the active window (cropped to motion), each cell stamped \`f<frame> <ms>ms\`
-- \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×); bright pixels = what moved INTO the stamped frame
+- \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×), cell for cell with the sheets; bright pixels = what moved INTO the stamped frame
 - \`motion.csv\` — per-frame motion bounding box and changed-pixel count
 ${hasChart ? "- `motion-curve.svg` — plotted x/y center and changed-pixel curves\n" : ""}- \`work/normalized.mp4\` — the constant-rate clip all frame numbers refer to (use it for any further ffmpeg extraction)
 ${stamps ? "" : `\n**Cells are unstamped** (this ffmpeg cannot draw text). Frames per sheet, row by row:\n\n${sheetFrameList(sheets, opts.grid, ms)}\n`}
@@ -564,7 +556,7 @@ ${noMotion ? "(no rows above the noise floor)" : markdownTable(motion.table, mot
 1. Skim \`overview.png\` for the overall arc, then the dense sheets for
    the frames that matter.
 2. Use the table/CSV to find where movement starts, peaks, overshoots,
-   and settles; convert frames to ms via frame·${Math.round(1000 / fps)}.
+   and settles; convert frames to ms via frame·1000/${fps}.
 3. Diff sheets show *what* moved; near-black diff cells are hold frames
    (potential jank if they sit mid-animation).
 4. Report findings in frame/ms terms, e.g. "frames 12–18 overshoot by
@@ -600,11 +592,11 @@ function main() {
   const motion = analyzeMotion(rows, meta, totalFrames, fps, opts.minPx);
   const crop = opts.crop && motion.active.length > 0 ? computeCrop(motion.union, opts.pad, meta) : null;
   const dense = motion.active.length > 0
-    ? pickDenseFrames(motion.start, motion.end, motion.table, opts.maxFrames)
+    ? pickDenseFrames(motion.start, motion.end, opts.maxFrames)
     : { frames: [], strategy: "none (no motion)" };
 
   console.log(`  rendering contact sheets`);
-  const sheets = renderSheets({ outDir, motion, crop, denseFrames: dense.frames, grid: opts.grid, meta, totalFrames, stamps });
+  const sheets = renderSheets({ outDir, motion, crop, denseFrames: dense.frames, grid: opts.grid, meta, totalFrames, stamps, fps });
 
   writeCsv(outDir, motion.table);
   const hasChart = writeChart(outDir, motion.table, motion);
@@ -618,15 +610,19 @@ function main() {
   console.log(`  done → ${path.join(outDir, "index.md")}`);
 }
 
-try {
-  main();
-} catch (err) {
-  if (err instanceof UsageError) {
-    console.error(`scrub: ${err.message}`);
-    console.error("");
-    console.error(usage());
+// Run only as a CLI; tests import the stamp helpers.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+if (isMain) {
+  try {
+    main();
+  } catch (err) {
+    if (err instanceof UsageError) {
+      console.error(`scrub: ${err.message}`);
+      console.error("");
+      console.error(usage());
+      process.exit(EXIT_ERR);
+    }
+    console.error(`scrub: ${err?.message ?? err}`);
     process.exit(EXIT_ERR);
   }
-  console.error(`scrub: ${err?.message ?? err}`);
-  process.exit(EXIT_ERR);
 }

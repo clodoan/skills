@@ -5,11 +5,16 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stampFilter, stampFontsize } from "./scrub.mjs";
 
 const CLI = fileURLToPath(new URL("./scrub.mjs", import.meta.url));
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 const opts = { skip: hasFfmpeg ? false : "ffmpeg not installed" };
+const canStamp = hasFfmpeg && spawnSync("ffmpeg", [
+  "-v", "error", "-f", "lavfi", "-i", "color=s=32x32:d=0.1", "-vf", "drawtext=text=f0", "-frames:v", "1", "-f", "null", "-",
+], { stdio: "ignore" }).status === 0;
+const stampOpts = { skip: canStamp ? false : "ffmpeg cannot draw text" };
 
 let dir;
 before(() => {
@@ -83,11 +88,11 @@ function fixture(name) {
 
 // Scrub each (fixture, args) once; later tests reuse the output.
 const runs = new Map();
-function scrubbed(name, args = []) {
-  const key = [name, ...args].join(" ");
+function scrubbed(name, args = [], env = {}) {
+  const key = [name, ...args, JSON.stringify(env)].join(" ");
   if (!runs.has(key)) {
     const outDir = file(`run-${runs.size}-${name.replace(/\W/g, "_")}`);
-    const { code, out } = runScrub([fixture(name), "--out", outDir, ...args]);
+    const { code, out } = runScrub([fixture(name), "--out", outDir, ...args], env);
     assert.equal(code, 0, out);
     runs.set(key, outDir);
   }
@@ -114,6 +119,47 @@ function readCsv(outDir) {
     const parts = l.split(",");
     return Object.fromEntries(cols.map((c, i) => [c, parts[i] === "" ? null : Number(parts[i])]));
   });
+}
+
+function pngSize(png) {
+  const out = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0", png], { encoding: "utf8" });
+  return out.trim().split(",").map(Number);
+}
+
+function grayRegion(src, [x, y, w, h]) {
+  return execFileSync("ffmpeg", [
+    "-v", "error", "-i", src, "-vf", `crop=${w}:${h}:${x}:${y},format=gray`, "-f", "rawvideo", "-",
+  ]);
+}
+
+// Cell i of a 4x4 sheet (margin and padding 2px): [x, y, w, h].
+function cellRect(png, i, grid = 4) {
+  const [W, H] = pngSize(png);
+  const w = (W - 4 - 2 * (grid - 1)) / grid;
+  const h = (H - 4 - 2 * (grid - 1)) / grid;
+  return [2 + (i % grid) * (w + 2), 2 + Math.floor(i / grid) * (h + 2), w, h];
+}
+
+function meanAbsDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+// Compare a cell's stamp with scrub's stamp style drawing a literal label
+// (pixFmt: yuv420p for frame sheets, gray for diff sheets).
+function stampDiff(png, i, label, pixFmt) {
+  const [x, y, w, h] = cellRect(png, i);
+  const ref = file(`ref-${w}x${h}-${label.replace(/\W/g, "")}-${pixFmt}.png`);
+  const style = stampFilter("0", stampFontsize(w), 30).replace(/text='[^']*'/, `text='${label}'`);
+  ffmpeg(["-f", "lavfi", "-i", `color=c=black:s=${w}x${h}:d=0.1`, "-vf", `format=${pixFmt},${style}`, "-frames:v", "1", ref]);
+  const refPx = grayRegion(ref, [0, 0, w, h]);
+  let [x1, y1, x2, y2] = [w, h, 0, 0];
+  for (let p = 0; p < refPx.length; p++) {
+    if (refPx[p] > 0) [x1, y1, x2, y2] = [Math.min(x1, p % w), Math.min(y1, Math.floor(p / w)), Math.max(x2, p % w), Math.max(y2, Math.floor(p / w))];
+  }
+  const text = [x1, y1, x2 - x1 + 1, y2 - y1 + 1];
+  return meanAbsDiff(grayRegion(png, [x + text[0], y + text[1], text[2], text[3]]), grayRegion(ref, text));
 }
 
 function readIndex(outDir) {
@@ -212,7 +258,39 @@ test("still clip reports no motion and keeps output minimal", opts, () => {
 test("long clips are capped", opts, () => {
   const outDir = scrubbed("long.mp4", ["--max-frames", "32"]);
   const sheets = readdirSync(path.join(outDir, "sheets")).filter((f) => f.startsWith("sheet-"));
-  assert.ok(sheets.length <= 2, `expected ≤2 dense sheets for --max-frames 32, got ${sheets.length}`);
+  assert.deepEqual(sheets, ["sheet-01.png", "sheet-02.png"]);
+});
+
+test("capped windows are sampled evenly end to end", opts, () => {
+  const index = readIndex(scrubbed("linear.mp4", ["--max-frames", "12"], { SCRUB_NO_DRAWTEXT: "1" }));
+  assert.match(index, /evenly spaced, about every 3\.3 frames/);
+  const listed = index.match(/`sheets\/sheet-01.png \(and diff-01.png\)`: (.*)/)[1].match(/f(\d+) /g).map((f) => Number(f.slice(1)));
+  assert.deepEqual(listed, [26, 29, 33, 36, 39, 42, 46, 49, 52, 55, 59, 62]);
+});
+
+test("stamps each cell with its exact frame and rounded ms", stampOpts, () => {
+  const outDir = scrubbed("linear.mp4");
+  const sheet = path.join(outDir, "sheets/sheet-01.png");
+  const diff = path.join(outDir, "sheets/diff-01.png");
+  // Cells 3 and 4 hold frames 29 ("f29 967ms") and 30 ("f30 1000ms").
+  for (const [png, pixFmt] of [[sheet, "yuv420p"], [diff, "gray"]]) {
+    assert.ok(stampDiff(png, 3, "f29 967ms", pixFmt) < 2, `${png}: cell 3 should read f29 967ms`);
+    assert.ok(stampDiff(png, 4, "f30 1000ms", pixFmt) < 2, `${png}: cell 4 should read f30 1000ms`);
+    assert.ok(stampDiff(png, 3, "f29 966ms", pixFmt) > 2, "a wrong label must not match");
+  }
+});
+
+test("diff cells line up with sheet cells", opts, () => {
+  const outDir = scrubbed("linear.mp4");
+  const diff = path.join(outDir, "sheets/diff-01.png");
+  const top = (i) => { const [x, y, w, h] = cellRect(diff, i); return grayRegion(diff, [x, y, w, Math.floor(h / 2)]); };
+  // Frame 29 is still (black diff); frame 30 is the first move.
+  assert.ok(top(3).every((v) => v < 16), "cell 3 (f29) should be black");
+  assert.ok(top(4).some((v) => v > 128), "cell 4 (f30) should show the move");
+  // Window starting at frame 0: the first diff cell is black.
+  const longDiff = path.join(scrubbed("long.mp4", ["--max-frames", "32"]), "sheets/diff-01.png");
+  const [x, y, w, h] = cellRect(longDiff, 0);
+  assert.ok(grayRegion(longDiff, [x, y, w, Math.floor(h / 2)]).every((v) => v < 16), "frame 0 has no predecessor");
 });
 
 test("gif input just works", opts, () => {
@@ -282,8 +360,8 @@ test("falls back to unstamped sheets when ffmpeg cannot draw text", opts, () => 
   assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
   const index = readIndex(outDir);
   assert.match(index, /Cells are unstamped/);
-  assert.match(index, /`sheets\/sheet-01.png`: f26 867ms, f27 900ms, /);
-  assert.match(index, /`sheets\/sheet-03.png`: f58 1933ms, .*f62 2067ms\n/);
+  assert.match(index, /`sheets\/sheet-01.png \(and diff-01.png\)`: f26 867ms, f27 900ms, /);
+  assert.match(index, /`sheets\/sheet-03.png \(and diff-03.png\)`: f58 1933ms, .*f62 2067ms\n/);
 });
 
 test("detects a small element moving in a large frame", opts, () => {

@@ -48,10 +48,9 @@ recording-scrub/
 - **Motion crop** — sheets are cropped to the bounding box of all motion
   (padded), and small crops are upscaled up to 4× (nearest-neighbor, so
   pixels stay inspectable).
-- **Long clips** — dense frames are capped (default 96): short clips get
-  every frame, medium clips a uniform stride, long clips the frames with
-  the most pixel change (motion peaks). The overview always spans the
-  full clip.
+- **Long clips** — dense frames are capped (default 96): windows that
+  fit get every frame, longer ones evenly spaced frames from start to
+  end. The overview always spans the full clip.
 - **Retina hint** — high-resolution captures are flagged as likely 2x so
   px can be halved into pt. It's a heuristic; verify against a known
   element size.
