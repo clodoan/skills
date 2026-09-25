@@ -1,5 +1,5 @@
 ---
-name: map
+name: ramble
 description: >-
   Document the screens and navigation flows that already exist in a
   codebase. Use whenever the user asks for a screen map, user-flow
@@ -9,10 +9,10 @@ description: >-
   Mermaid flowchart of real routes — no drawing, no guessing.
 ---
 
-# Map
+# Ramble
 
 The flow diagram is already in the code — routers and links define it.
-Map walks them and emits a Mermaid flowchart of real screens and real
+Ramble walks them and emits a Mermaid flowchart of real screens and real
 transitions, with a report of everything it could not resolve.
 
 ## Workflow
@@ -20,7 +20,7 @@ transitions, with a report of everything it could not resolve.
 1. Run it on the repo (or the app inside a monorepo):
 
    ```bash
-   node <path-to-skill>/scripts/map.mjs .            # or apps/web
+   node <path-to-skill>/scripts/ramble.mjs .            # or apps/web
    ```
 
    It writes `map-output/flow.md` (diagram + report) and `flow.mmd`.
@@ -39,10 +39,10 @@ transitions, with a report of everything it could not resolve.
    auth-gate edges. Dynamic params are `:param`, catch-alls `:param*`,
    optional catch-alls `:param*?`.
 
-4. Optional visual mode (needs the bezel skill and a running app):
+4. Optional visual mode (needs the plinth skill and a running app):
 
    ```bash
-   node <path-to-skill>/scripts/map.mjs . --thumbs --base-url http://localhost:3000
+   node <path-to-skill>/scripts/ramble.mjs . --thumbs --base-url http://localhost:3000
    ```
 
    Adds `flow-visual.md` with framed screenshots of static routes.

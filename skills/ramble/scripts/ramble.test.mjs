@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = fileURLToPath(new URL("./map.mjs", import.meta.url));
+const CLI = fileURLToPath(new URL("./ramble.mjs", import.meta.url));
 
 let base;
 before(() => {
-  base = mkdtempSync(path.join(tmpdir(), "map-test-"));
+  base = mkdtempSync(path.join(tmpdir(), "ramble-test-"));
   process.on("exit", () => rmSync(base, { recursive: true, force: true }));
 });
 
@@ -24,8 +24,8 @@ function makeApp(name, files) {
   return root;
 }
 
-function runMap(root, args = []) {
-  const out = path.join(root, "map-out");
+function runRamble(root, args = []) {
+  const out = path.join(root, "ramble-out");
   const res = spawnSync(process.execPath, [CLI, root, "--out", out, ...args], { encoding: "utf8" });
   const read = (f) => {
     try { return readFileSync(path.join(out, f), "utf8"); } catch { return ""; }
@@ -51,7 +51,7 @@ test("next app router: groups, dynamic, catch-alls, slots, intercepts, privates"
     "middleware.ts": `import { NextResponse } from "next/server";
       export function middleware() { return NextResponse.redirect(new URL("/login", req.url)); }`,
   });
-  const { code, out, mmd, md } = runMap(root);
+  const { code, out, mmd, md } = runRamble(root);
   assert.equal(code, 0, out);
 
   for (const route of ["/", "/pricing", "/login", "/dashboard", "/posts/:id", "/docs/:slug*", "/wiki/:path*?"]) {
@@ -78,7 +78,7 @@ test("edge targets resolve template literals against dynamic routes", () => {
     "app/page.tsx": "export default () => <Link href={`/items/${item.id}`}>x</Link>",
     "app/items/[itemId]/page.tsx": "export default () => null",
   });
-  const { code, mmd } = runMap(root);
+  const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   assert.match(mmd, /r\d+ --> r\d+/);
 });
@@ -92,7 +92,7 @@ test("next pages router: index, nested, dynamic; _app and api excluded", () => {
     "pages/_app.tsx": "export default () => null",
     "pages/api/hello.ts": "export default () => {}",
   });
-  const { code, mmd } = runMap(root);
+  const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   for (const route of ["/", "/about", "/blog/:slug"]) {
     assert.ok(mmd.includes(`["${route}"]`), `route ${route} missing`);
@@ -107,7 +107,7 @@ test("a content folder named pages/ is not mistaken for a router (real case: tax
     "content/pages/privacy.mdx": "# Privacy",
     "content/pages/terms.mdx": "# Terms",
   });
-  const { code, mmd, md } = runMap(root);
+  const { code, mmd, md } = runRamble(root);
   assert.equal(code, 0);
   assert.ok(!mmd.includes("/privacy"), "MDX content dir was treated as a pages router");
   assert.ok(!md.includes("next-pages"));
@@ -119,7 +119,7 @@ test("host-based app folders (real case: dub) become apps, not URL segments", ()
     "app/app.example.com/dashboard/page.tsx": "export default () => null",
     "app/admin.example.com/page.tsx": "export default () => null",
   });
-  const { code, mmd } = runMap(root);
+  const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   assert.ok(mmd.includes('["/dashboard"]'), "host folder leaked into URL path");
   assert.ok(!mmd.includes('/app.example.com/dashboard'));
@@ -133,7 +133,7 @@ test("symlinked files in the route tree do not crash the walker (real case: dub)
     "LICENSE.md": "MIT",
   });
   symlinkSync(path.join(root, "LICENSE.md"), path.join(root, "app", "LICENSE.md"));
-  const { code, mmd } = runMap(root);
+  const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   assert.ok(mmd.includes('["/"]'));
 });
@@ -151,7 +151,7 @@ test("react-router: literal paths, relative nesting, splat", () => {
         { path: "*", element: null },
       ]);`,
   });
-  const { code, mmd } = runMap(root);
+  const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   for (const route of ["/", "/app", "/app/settings", "/app/teams/:teamId", "/:rest*"]) {
     assert.ok(mmd.includes(`["${route}"]`), `route ${route} missing`);
@@ -179,7 +179,7 @@ test("react-router central paths config resolves identifier chains (real case: b
         ]},
       ]);`,
   });
-  const { code, mmd, md } = runMap(root);
+  const { code, mmd, md } = runRamble(root);
   assert.equal(code, 0);
   for (const route of ["/", "/auth/login", "/app", "/app/discussions"]) {
     assert.ok(mmd.includes(`["${route}"]`), `route ${route} missing`);
@@ -194,7 +194,7 @@ test("expression-valued navigations are reported, not dropped", () => {
       const g = () => router.push(dynamicUrl);`,
     "app/other/page.tsx": "export default () => null",
   });
-  const { code, md } = runMap(root);
+  const { code, md } = runRamble(root);
   assert.equal(code, 0);
   assert.match(md, /Unresolved navigations[^:]*:\*\* 2 \(2 expression-valued\)/);
   assert.match(md, /\{paths\.app\.getHref\(\)\}/);
@@ -207,7 +207,7 @@ test("every route file appears in the diagram and every edge resolves (self-chec
     "app/page.tsx": `export default () => <a href="/a">a</a>`,
     "app/a/page.tsx": `export default () => <a href="/missing">gone</a>`,
   });
-  const { code, md } = runMap(root);
+  const { code, md } = runRamble(root);
   assert.equal(code, 0);
   assert.match(md, /Self-check: every route file appears/);
   // /missing has no route: must land in unresolved, never in the diagram.
@@ -229,7 +229,7 @@ test("bundled grok-chat fixture maps to its documented shape", () => {
 
 test("no routers found is a usage error", () => {
   const root = makeApp("empty", { "README.md": "nothing here" });
-  const { code, out } = runMap(root);
+  const { code, out } = runRamble(root);
   assert.equal(code, 2, out);
   assert.match(out, /no routers found/);
 });

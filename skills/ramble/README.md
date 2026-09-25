@@ -1,10 +1,10 @@
-# Map
+# Ramble
 
 Mermaid user-flow diagrams of the screens that already exist in your
 codebase — the document-the-built-flows job (Autoflow-style) done from
 the router, by your coding agent, with zero dependencies.
 
-Map walks router conventions (Next.js `app/` and `pages/`, React Router
+Ramble walks router conventions (Next.js `app/` and `pages/`, React Router
 config) and link/redirect call sites, then emits a flowchart of real
 routes: grouped by segment, dynamic params labeled, redirect and
 middleware edges dashed. Anything it cannot resolve is **reported with
@@ -20,7 +20,7 @@ shaped like a Grok-style chat product, bundled as a demo fixture
 ## Quick start
 
 ```bash
-node skills/map/scripts/map.mjs .          # or a monorepo app dir: apps/web
+node skills/ramble/scripts/ramble.mjs .          # or a monorepo app dir: apps/web
 # → map-output/flow.md (Mermaid + report), map-output/flow.mmd
 ```
 
@@ -57,14 +57,14 @@ monorepos). It reads conventions and literals, not arbitrary JavaScript
 Every run verifies: every route file appears in the diagram, and every
 edge points to an existing route. Failures print and exit non-zero.
 
-## Visual mode (with the bezel skill)
+## Visual mode (with the plinth skill)
 
 ```bash
-node skills/map/scripts/map.mjs . --thumbs --base-url http://localhost:3000
+node skills/ramble/scripts/ramble.mjs . --thumbs --base-url http://localhost:3000
 ```
 
 Captures static routes (cap `--thumb-cap`, default 12) through
-[bezel](../bezel/) into `flow-visual.md`. Demo: the grok-chat fixture
+[plinth](../plinth/) into `flow-visual.md`. Demo: the grok-chat fixture
 served locally (`node fixtures/grok-chat/serve.mjs`), 8/8 static routes
 captured:
 
@@ -79,7 +79,7 @@ captured:
 | [dubinc/dub](https://github.com/dubinc/dub) (`apps/web`) | `3c88d01` | 197 screens, 507 API handlers. **Fixes found:** symlinked `LICENSE.md` inside `(ee)` crashed the walker (symlinks now stat'ed); host-based folders (`app/app.dub.co/…`) became URL segments (now app subgraphs); template-literal hrefs were invisible (fix raised real edges 105 → 187). |
 | [alan2207/bulletproof-react](https://github.com/alan2207/bulletproof-react) (`apps/react-vite`) | `9506629` | **Fix found:** all route strings live in a central `paths` config referenced by identifier chains — a literal-only scan saw 1 route. With chain resolution: all 9 routes, correct nesting; its 19 `getHref()` navigations are expression-valued and land in the unresolved report (edges honestly 0). |
 | [vercel/app-playground](https://github.com/vercel/app-playground) | `b5c0f7e` | 37 screens (16 dynamic); 6 parallel-route slot pages correctly excluded from URLs (`@audience`, `@views`); `--thumbs` against the live [app-router.vercel.app](https://app-router.vercel.app) captured 9/9 static routes. |
-| [`fixtures/grok-chat/`](fixtures/grok-chat/) (bundled fixture) | in-repo | 11 screens, 18 edges; `@history` slot and `(.)share` intercept reported; middleware auth-gate edge dashed; `--thumbs` captured 8/8 static routes. Its center-on-a-border screens also caught a real 1px frame-alignment bug in bezel's browser frame. |
+| [`fixtures/grok-chat/`](fixtures/grok-chat/) (bundled fixture) | in-repo | 11 screens, 18 edges; `@history` slot and `(.)share` intercept reported; middleware auth-gate edge dashed; `--thumbs` captured 8/8 static routes. Its center-on-a-border screens also caught a real 1px frame-alignment bug in plinth's browser frame. |
 
 Sample real-repo outputs (from the runs above):
 
@@ -97,7 +97,7 @@ components (navbars) are off by default (`--include-shared`); i18n
 ## Tests
 
 ```bash
-node --test skills/map/scripts/map.test.mjs
+node --test skills/ramble/scripts/ramble.test.mjs
 ```
 
 12 tests covering: app-router conventions (groups, dynamic, catch-alls,

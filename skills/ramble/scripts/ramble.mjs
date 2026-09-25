@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * map — a Mermaid flowchart of the screens and transitions that
+ * ramble — a Mermaid flowchart of the screens and transitions that
  * actually exist in a codebase.
  *
  * Walks router conventions (Next.js app/ and pages/, React Router
@@ -32,18 +32,18 @@ const PRUNE_DIRS = new Set([
 class UsageError extends Error {}
 
 function usage() {
-  return `Usage: map <dir> [options]
+  return `Usage: ramble <dir> [options]
 
 Walks the router(s) in <dir> and writes a Mermaid flowchart of real
 screens and transitions, plus a report of anything it could not
 resolve.
 
 Options:
-  --out <dir>         Output directory (default: map-output)
+  --out <dir>         Output directory (default: ramble-output)
   --include-shared    Add edges found in shared (non-route) files,
                       attributed to one [shared UI] node
   --max-label <n>     Truncate edge labels (default 24 chars)
-  --thumbs            Also render screen thumbnails via the bezel skill
+  --thumbs            Also render screen thumbnails via the plinth skill
   --base-url <url>    Running app URL for --thumbs (required with it)
   --thumb-cap <n>     Max thumbnails (default 12, static routes only)
   -h, --help          Show this help
@@ -56,7 +56,7 @@ Exit codes: 0 ok, 2 usage error.`;
 
 function parseArgs(argv) {
   const opts = {
-    root: null, out: "map-output", includeShared: false, maxLabel: 24,
+    root: null, out: "ramble-output", includeShared: false, maxLabel: 24,
     thumbs: false, baseUrl: null, thumbCap: 12,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -93,11 +93,11 @@ function parseArgs(argv) {
 // ---------------------------------------------------------- thumbnails
 
 function renderThumbs(routes, opts) {
-  const bezel = process.env.MAP_BEZEL
-    ?? fileURLToPath(new URL("../../bezel/scripts/bezel.mjs", import.meta.url));
-  if (!existsSync(bezel)) {
+  const plinth = process.env.RAMBLE_PLINTH
+    ?? fileURLToPath(new URL("../../plinth/scripts/plinth.mjs", import.meta.url));
+  if (!existsSync(plinth)) {
     throw new UsageError(
-      "--thumbs needs the bezel skill next to map (skills/bezel); set MAP_BEZEL to its scripts/bezel.mjs",
+      "--thumbs needs the plinth skill next to ramble (skills/plinth); set RAMBLE_PLINTH to its scripts/plinth.mjs",
     );
   }
   const targets = routes.filter((r) => !r.dynamic).slice(0, opts.thumbCap);
@@ -109,7 +109,7 @@ function renderThumbs(routes, opts) {
     const png = path.join(thumbsDir, `${slug}.png`);
     const url = `${opts.baseUrl.replace(/\/$/, "")}${r.urlPath}`;
     const res = spawnSync(process.execPath, [
-      bezel, url, "--device", "browser", "--padding", "16", "--no-shadow", "--bg", "none", "--out", png,
+      plinth, url, "--device", "browser", "--padding", "16", "--no-shadow", "--bg", "none", "--out", png,
     ], { encoding: "utf8", timeout: 120000 });
     const ok = res.status === 0 && existsSync(png);
     if (ok) {
@@ -117,7 +117,7 @@ function renderThumbs(routes, opts) {
       spawnSync("ffmpeg", ["-y", "-loglevel", "error", "-i", png, "-vf", "scale=560:-1:flags=lanczos", png + ".small.png"], {});
       rows.push({ route: r.urlPath, img: existsSync(png + ".small.png") ? `thumbs/${slug}.png.small.png` : `thumbs/${slug}.png` });
     } else {
-      rows.push({ route: r.urlPath, error: (res.stdout + res.stderr).split("\n").find((l) => l.includes("bezel:")) ?? "capture failed" });
+      rows.push({ route: r.urlPath, error: (res.stdout + res.stderr).split("\n").find((l) => l.includes("plinth:")) ?? "capture failed" });
     }
     console.log(`  thumb ${r.urlPath} — ${ok ? "ok" : "FAILED"}`);
   }
@@ -717,7 +717,7 @@ function main() {
   const mermaid = emitMermaid({ routes: finalRoutes, edges, maxLabel: opts.maxLabel });
   const problems = validate(finalRoutes, edges, mermaid);
 
-  const report = `## Map report
+  const report = `## Ramble report
 
 - **Routers:** ${roots.map((r) => r.kind + (r.dir ? ` (${path.relative(rootDir, r.dir)})` : "")).join(", ")}
 - **Screens:** ${finalRoutes.length} (${finalRoutes.filter((r) => r.dynamic).length} dynamic)${routes.length !== finalRoutes.length ? ` — ${routes.length - finalRoutes.length} duplicate URL(s) merged` : ""}
@@ -738,11 +738,11 @@ ${problems.length ? `\n**SELF-CHECK FAILURES:**\n${problems.map((p) => `- ${p}`)
     `# Screen map\n\n\`\`\`mermaid\n${mermaid}\n\`\`\`\n\n${report}\n`,
   );
 
-  console.log(`map · ${finalRoutes.length} screens, ${edges.length} edges → ${path.join(opts.out, "flow.md")}`);
+  console.log(`ramble · ${finalRoutes.length} screens, ${edges.length} edges → ${path.join(opts.out, "flow.md")}`);
   console.log(report.split("\n").slice(2, 10).join("\n"));
   if (opts.thumbs) renderThumbs(finalRoutes, opts);
   if (problems.length) {
-    console.error(`map: self-check failed:\n${problems.join("\n")}`);
+    console.error(`ramble: self-check failed:\n${problems.join("\n")}`);
     process.exit(1);
   }
 }
@@ -751,11 +751,11 @@ try {
   main();
 } catch (err) {
   if (err instanceof UsageError) {
-    console.error(`map: ${err.message}`);
+    console.error(`ramble: ${err.message}`);
     console.error("");
     console.error(usage());
     process.exit(EXIT_USAGE);
   }
-  console.error(`map: unexpected error: ${err?.stack ?? err}`);
+  console.error(`ramble: unexpected error: ${err?.stack ?? err}`);
   process.exit(EXIT_USAGE);
 }
