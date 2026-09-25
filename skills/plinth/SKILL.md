@@ -1,25 +1,20 @@
 ---
 name: plinth
 description: >-
-  Produce device-framed, DPR-correct screenshots of a running app or URL
-  for READMEs, PR bodies, and social posts. Use whenever the user asks
-  for app screenshots, device mockups, framed screenshots, hero images,
-  a phone/tablet/laptop/browser frame around a UI, or a scrolled video
-  capture of a page. Captures with Playwright at exact device viewports
-  and composites into generated CSS frames — no design tool needed.
+  Device-framed, DPR-correct screenshots of a URL or running app (iPhone,
+  Pixel, iPad, MacBook, browser window), or a scrolled mp4/gif. Use for
+  app screenshots, device mockups, and framed hero images for READMEs,
+  PR bodies, and social posts.
 ---
 
 # Plinth
 
-Screenshots that look like product shots, straight from the running app.
-Plinth captures a URL at an exact device viewport (DPR-correct, so text
-is pixel-sharp) and composites it into a clean generated device frame.
-
 ## Workflow
 
-1. One-time setup in the skill directory: `npm install` (installs
-   playwright-core; it drives the system Chrome — no browser download).
-   The target app must be reachable by URL (local dev server or public).
+1. One-time setup in the skill directory: `npm install` (playwright-core
+   drives the installed Chrome; nothing is downloaded; `PLINTH_BROWSER`
+   overrides the binary). The app must be reachable by URL; a bare
+   `localhost:3000` means http.
 
 2. Capture:
 
@@ -30,37 +25,33 @@ is pixel-sharp) and composites it into a clean generated device frame.
    node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --scroll --out demo.mp4
    ```
 
-   Devices: `iphone-16-pro`, `iphone-16`, `iphone-15-pro`, `pixel-8`,
-   `ipad-pro-11`, `macbook-14`, `browser`. Phone modes: `--mode
-   standalone` (default: status bar + home indicator, page captured
-   inside the safe area so nothing sits under the Dynamic Island) |
-   `safari` (mobile Safari with compact bottom bar) | `bare`
-   (full-bleed). Other flags: `--status light|dark` overrides the
-   luminance-based status bar scheme, `--buttons`, `--dark`,
-   `--bg <preset|css>`, `--frame light`, `--padding`, `--no-shadow`,
-   `--hide "<selector,selector>"`, `--wait <ms>`.
+   Devices: `iphone-16-pro` (default), `iphone-16`, `iphone-15-pro`,
+   `pixel-8`, `ipad-pro-11`, `macbook-14`, `browser`. `--mode`:
+   `standalone` (default: page inside the safe area, status bar + home
+   indicator drawn), `safari` (iPhones only: compact bottom bar), `bare`
+   (phones/tablets: full-bleed). Output defaults to
+   `plinth-<device>.png` in the working directory (`plinth-multi.png`,
+   `plinth-<device>-scroll.mp4`); `--out` must end in `.png`, or
+   `.mp4`/`.gif` with `--scroll`. All flags: `--help`.
 
-3. **Trust the checks, and say what they said.** Every single-device run
-   verifies itself and prints `check:` lines: safe-area capture is
-   DPR-exact, output dimensions match the device spec, frame alignment,
-   the Dynamic Island is solid black at its spec position, and the home
-   indicator is present. Exit 1 means a check failed — do not hand the
-   image over; re-run with `--wait` higher or report the failure.
+3. Report the `check:` lines. Single-device stills and frame 0 of a
+   `--scroll` video are verified: content matches the capture
+   pixel-for-pixel and the chrome (status bar, home indicator, menu bar,
+   window chrome) is drawn. Exit 1: a check failed; the file is kept at
+   `<name>.failed.png` (or `.failed.mp4`). Don't deliver it; report the
+   failure. Exit 2 is a usage error, exit 3 a runtime error (navigation,
+   browser, ffmpeg). Multi-device rows are not checked.
 
-4. Look at the output image before delivering it. Real pages have real
-   problems: cookie banners (`--hide`), unseeded/empty states, fonts
-   still swapping (`--wait 2000`), lazy images below the fold (only
-   `--scroll` runs the full-page pre-scroll).
+4. The checks can't see page problems, so open the image yourself:
+   cookie banners (`--hide "<selector,…>"`), empty or unseeded states,
+   late fonts or animations (`--wait 2000`), bot walls. In `--scroll`
+   videos, sticky and fixed elements scroll away with the content.
 
 ## Choosing output
 
-- README hero: multi-device row (`--devices`), light `--bg`, PNG.
-- PR body / bug report: single device at 1:1 (default), studio bg.
-- Social: single phone `--dark --bg sunset`.
-- Animated/scrolled demo: `--scroll` → mp4 (or `--out x.gif`), uses
-  ffmpeg.
-
-Multi-device rows composite at @2x for sane file sizes; single-device
-output is 1:1 native pixels of the capture.
+- README hero: multi-device row (`--devices`, composited at @2x), light `--bg`.
+- PR body / bug report: single device, 1:1 native pixels (default).
+- Social: single phone, `--dark --bg sunset`.
+- Scrolled demo: `--scroll` (needs ffmpeg).
 
 Full option and device reference: [README.md](README.md).
