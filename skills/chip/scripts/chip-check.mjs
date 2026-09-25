@@ -4,15 +4,15 @@
  *
  * Inspects a git diff (working tree vs base, or an explicit range) and
  * compares it against budgets: lines changed, files touched, top-level
- * areas touched, and risky surfaces (lockfiles, migrations, public
- * API/exports, CI config). Exits non-zero with a split suggestion when
+ * areas touched, and risky surfaces (lockfiles, migrations, chip config,
+ * public API/exports, CI config). Exits non-zero with a split suggestion when
  * a budget is blown, unless an explicit override is present.
  *
  * Zero dependencies. Node >= 18.
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, lstatSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -20,39 +20,32 @@ const EXIT_PASS = 0;
 const EXIT_FAIL = 1;
 const EXIT_USAGE = 2;
 
+// Rationale for each budget: README.md "What it measures".
 const DEFAULTS = {
-  // ~400 changed lines is where review effectiveness falls off a cliff
-  // (SmartBear/Cisco code review study). Chip aims below the ceiling,
-  // not at it.
   maxLines: 300,
-  // A step you can hold in your head. Mechanical renames can override.
   maxFiles: 12,
-  // A change plus its tests usually lives in <= 2 areas. Three or more
-  // areas means several concerns are riding along.
   maxAreas: 2,
-  // When a risky surface (lockfile, migration, CI config) is touched,
-  // everything else in the diff must stay under this many lines so the
-  // risky change ships (nearly) alone.
+  // Max lines outside a ship-alone risky surface when one is touched.
   riskyCompanionLines: 80,
-  // Directories whose immediate children are treated as separate areas
-  // (monorepo layouts).
+  // Directories whose immediate children are separate areas.
   areaRoots: ["packages", "apps", "libs", "services", "crates", "skills"],
-  // Glob patterns excluded from every count.
   ignore: [],
 };
 
 const RISKY_DEFAULTS = {
   lockfile: [
-    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|bun\.lock|deno\.lock|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|flake\.lock|packages\.lock\.json)$/,
+    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|bun\.lock|deno\.lock|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|flake\.lock|packages\.lock\.json|Podfile\.lock|mix\.lock|pubspec\.lock|Package\.resolved|gradle\.lockfile)$/,
   ],
-  migration: [/(^|\/)migrations?\//i, /(^|\/)alembic\/versions\//],
+  // Prose under a migrations/ dir (guides, READMEs) is not a migration.
+  migration: [/(^|\/)migrations?\/(?!.*\.(md|mdx|rst|txt)$)/i, /(^|\/)alembic\/versions\//],
   publicApi: [
     /(^|\/)index\.(js|jsx|ts|tsx|mjs|cjs)$/,
     /\.d\.ts$/,
     /(^|\/)(package\.json|pyproject\.toml|Cargo\.toml|go\.mod)$/,
   ],
+  config: [/^chip\.config\.json$/],
   ci: [
-    /^\.github\/workflows\//,
+    /^\.github\/(workflows|actions)\//,
     /^\.gitlab-ci\.yml$/,
     /^Jenkinsfile/,
     /^\.circleci\//,
@@ -65,15 +58,17 @@ const RISKY_LABELS = {
   lockfile: "lockfile / dependency change",
   migration: "migration",
   publicApi: "public API / package manifest",
+  config: "chip config",
   ci: "CI config",
 };
 
 // Risky categories that must ship (nearly) alone. publicApi is
 // report-only: touching an export surface alongside its implementation
 // is a normal small step.
-const SHIP_ALONE = ["lockfile", "migration", "ci"];
+const SHIP_ALONE = ["lockfile", "migration", "config", "ci"];
 
-const OVERRIDE_TRAILER = /^Chip-Override:\s*(\S.*)$/m;
+// Key at line start, any case; the reason must be on the same line.
+const OVERRIDE_TRAILER = /^chip-override:[ \t]*(\S.*)$/im;
 
 function usage() {
   return `Usage: chip-check [options]
@@ -87,12 +82,14 @@ Options:
                       origin/main, origin/master, main, master).
   --range <a...b>     Check an explicit committed range instead of the
                       working tree (e.g. origin/main...HEAD in CI).
-  --config <path>     Path to config JSON. Default: chip.config.json at
-                      the repo root, if present.
+                      Must contain ".." or "...".
+  --config <path>     Path to config JSON (relative to --cwd). Default:
+                      chip.config.json at the repo root; with --range it
+                      is read at the range's merge base.
   --override <reason> Explicit escape hatch. Reports violations but
                       exits 0. The reason is required and printed.
-                      A "Chip-Override: <reason>" commit trailer in the
-                      checked range works the same way.
+                      A "Chip-Override: <reason>" line in the newest
+                      non-merge commit of the range works the same way.
   --cwd <dir>         Run as if started in <dir>.
   -h, --help          Show this help.
 
@@ -133,9 +130,21 @@ function parseArgs(argv) {
 }
 
 class UsageError extends Error {}
+class GitError extends Error {}
 
+// core.quotePath=false plus -z keeps non-ASCII and odd paths verbatim.
 function git(cwd, args) {
-  return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  try {
+    return execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const detail = String(err.stderr ?? "").trim().split("\n")[0] || err.message;
+    throw new GitError(`git ${args.join(" ")} failed: ${detail}`);
+  }
 }
 
 function tryGit(cwd, args) {
@@ -146,32 +155,109 @@ function tryGit(cwd, args) {
   }
 }
 
+// Diff flags that ignore user config (diff.renames, external diff, textconv).
+const DIFF_FLAGS = ["--numstat", "-z", "-M", "--no-ext-diff", "--no-textconv", "--no-color"];
+
+function resolveMergeBase(cwd, left, right) {
+  for (const ref of [left, right]) {
+    if (tryGit(cwd, ["rev-parse", "--verify", "-q", `${ref}^{commit}`]) === null) {
+      throw new UsageError(`unknown ref: ${ref}`);
+    }
+  }
+  const mergeBase = tryGit(cwd, ["merge-base", left, right]);
+  if (mergeBase) return mergeBase;
+  const shallow = tryGit(cwd, ["rev-parse", "--is-shallow-repository"]) === "true";
+  throw new GitError(
+    `no merge base between ${left} and ${right}.` +
+      (shallow ? " This is a shallow clone; fetch full history (actions/checkout: fetch-depth: 0)." : ""),
+  );
+}
+
+// Like .gitignore: a pattern without "/" matches at any depth; others are
+// anchored at the repo root. Supports *, **, ? and {a,b}.
 function globToRegExp(glob) {
+  const anchored = glob.includes("/") ? glob.replace(/^\//, "") : `**/${glob}`;
+  return new RegExp(`^${globBody(anchored)}$`);
+}
+
+function globBody(glob) {
   let out = "";
   let i = 0;
   while (i < glob.length) {
+    const close = glob[i] === "{" ? glob.indexOf("}", i) : -1;
     if (glob.startsWith("**/", i)) { out += "(?:.*/)?"; i += 3; }
     else if (glob.startsWith("**", i)) { out += ".*"; i += 2; }
     else if (glob[i] === "*") { out += "[^/]*"; i += 1; }
     else if (glob[i] === "?") { out += "[^/]"; i += 1; }
+    else if (close > i) { out += `(?:${glob.slice(i + 1, close).split(",").map(globBody).join("|")})`; i = close + 1; }
     else { out += glob[i].replace(/[.+^${}()|[\]\\]/g, "\\$&"); i += 1; }
   }
-  return new RegExp(`^${out}$`);
+  return out;
 }
 
-function loadConfig(opts, repoRoot) {
-  let file = opts.config;
-  if (!file) {
-    const candidate = path.join(repoRoot, "chip.config.json");
-    if (existsSync(candidate)) file = candidate;
-  } else if (!existsSync(file)) {
-    throw new UsageError(`config file not found: ${file}`);
-  }
-  const user = file ? JSON.parse(readFileSync(file, "utf8")) : {};
+const CONFIG_FILE = "chip.config.json";
+const NUMBER_KEYS = ["maxLines", "maxFiles", "maxAreas", "riskyCompanionLines"];
+const LIST_KEYS = ["areaRoots", "ignore"];
 
-  const config = { ...DEFAULTS, ...user };
-  config.areaRoots = user.areaRoots ?? DEFAULTS.areaRoots;
-  config.ignoreRes = (user.ignore ?? DEFAULTS.ignore).map(globToRegExp);
+// --config wins (the caller chose it). A --range check reads the config at
+// the range's merge base so a PR cannot relax its own budgets; working-tree
+// mode reads the working tree.
+function readConfigSource(opts, repoRoot, configRev) {
+  if (opts.config) {
+    const file = path.resolve(opts.cwd, opts.config);
+    if (!existsSync(file)) throw new UsageError(`config file not found: ${file}`);
+    return { label: file, text: readFileSync(file, "utf8") };
+  }
+  if (configRev) {
+    const at = configRev.slice(0, 12);
+    const text = tryGit(repoRoot, ["show", `${configRev}:${CONFIG_FILE}`]);
+    return text === null
+      ? { label: `defaults (no ${CONFIG_FILE} at range base ${at})`, text: null }
+      : { label: `${CONFIG_FILE} at range base ${at}`, text };
+  }
+  const file = path.join(repoRoot, CONFIG_FILE);
+  return existsSync(file) ? { label: CONFIG_FILE, text: readFileSync(file, "utf8") } : { label: "defaults", text: null };
+}
+
+function validateConfig(user, label) {
+  const fail = (msg) => {
+    throw new UsageError(`${label}: ${msg}`);
+  };
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+  if (!isObject(user)) fail("must be a JSON object");
+  for (const [key, value] of Object.entries(user)) {
+    if (NUMBER_KEYS.includes(key)) {
+      if (!Number.isFinite(value) || value < 0) fail(`${key} must be a number >= 0`);
+    } else if (LIST_KEYS.includes(key)) {
+      if (!isStrings(value)) fail(`${key} must be an array of strings`);
+    } else if (key === "risky") {
+      if (!isObject(value)) fail("risky must be an object");
+      for (const [cat, globs] of Object.entries(value)) {
+        if (!(cat in RISKY_DEFAULTS)) fail(`unknown risky category "${cat}" (expected ${Object.keys(RISKY_DEFAULTS).join(", ")})`);
+        if (!isStrings(globs)) fail(`risky.${cat} must be an array of strings`);
+      }
+    } else {
+      fail(`unknown key "${key}"`);
+    }
+  }
+}
+
+function loadConfig(opts, repoRoot, configRev) {
+  const source = readConfigSource(opts, repoRoot, configRev);
+  let user = {};
+  if (source.text !== null) {
+    try {
+      user = JSON.parse(source.text);
+    } catch (err) {
+      throw new UsageError(`${source.label}: invalid JSON: ${err.message}`);
+    }
+    validateConfig(user, source.label);
+  }
+
+  const config = { ...DEFAULTS, ...user, label: source.label };
+  config.ignoreRes = config.ignore.map(globToRegExp);
+  config.areaRoots = config.areaRoots.map((r) => r.replace(/^\/+|\/+$/g, "")).sort((a, b) => b.length - a.length);
   config.risky = {};
   for (const cat of Object.keys(RISKY_DEFAULTS)) {
     const extra = (user.risky?.[cat] ?? []).map(globToRegExp);
@@ -189,26 +275,22 @@ function detectBase(cwd) {
   return null;
 }
 
-// numstat rename forms: "dir/{old => new}/file.ts" or "old.ts => new.ts"
-function normalizePath(p) {
-  if (!p.includes(" => ")) return p;
-  const braced = p.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
-  if (braced) return (braced[1] + braced[3] + braced[4]).replace(/\/{2,}/g, "/");
-  return p.split(" => ").pop();
-}
-
+// `numstat -z` records: "added\tdeleted\tpath\0", or for a rename
+// "added\tdeleted\t\0old\0new\0".
 function parseNumstat(text) {
   const files = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    const [added, deleted, ...rest] = line.split("\t");
-    const filePath = normalizePath(rest.join("\t"));
+  const tokens = text.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    if (!tokens[i]) continue;
+    const [added, deleted, ...rest] = tokens[i].split("\t");
+    let filePath = rest.join("\t");
+    let oldPath = null;
+    if (filePath === "") {
+      oldPath = tokens[++i];
+      filePath = tokens[++i];
+    }
     const binary = added === "-" || deleted === "-";
-    files.push({
-      path: filePath,
-      lines: binary ? 0 : Number(added) + Number(deleted),
-      binary,
-    });
+    files.push({ path: filePath, oldPath, lines: binary ? 0 : Number(added) + Number(deleted), binary });
   }
   return files;
 }
@@ -218,27 +300,40 @@ function looksBinary(buf) {
   return slice.includes(0);
 }
 
-function collectUntracked(cwd, repoRoot) {
-  const out = tryGit(cwd, ["ls-files", "--others", "--exclude-standard", "--full-name"]);
-  if (!out) return [];
-  return out.split("\n").filter(Boolean).map((p) => {
-    try {
-      const buf = readFileSync(path.join(repoRoot, p));
-      if (looksBinary(buf)) return { path: p, lines: 0, binary: true };
-      const text = buf.toString("utf8");
-      const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-      return { path: p, lines, binary: false };
-    } catch {
-      return { path: p, lines: 0, binary: true };
-    }
+// Run from the repo root: ls-files only lists files under its cwd.
+function collectUntracked(repoRoot) {
+  const out = git(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"]);
+  return out.split("\0").filter(Boolean).map((p) => {
+    const full = path.join(repoRoot, p);
+    const stat = lstatSync(full, { throwIfNoEntry: false });
+    // git diffs a symlink as one line: its target path.
+    if (stat?.isSymbolicLink()) return { path: p, oldPath: null, lines: 1, binary: false };
+    if (!stat?.isFile()) return { path: p, oldPath: null, lines: 0, binary: true };
+    const buf = readFileSync(full);
+    if (looksBinary(buf)) return { path: p, oldPath: null, lines: 0, binary: true };
+    const text = buf.toString("utf8");
+    const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+    return { path: p, oldPath: null, lines, binary: false };
   });
 }
 
+// Files directly at the repo root get their own row but no area budget:
+// a README or manifest touch should not make a step "two concerns".
+const ROOT_AREA = "(root)";
+
+// areaRoots are sorted longest first, so "frontend/apps" beats "frontend".
 function areaOf(filePath, areaRoots) {
   const parts = filePath.split("/");
-  if (parts.length === 1) return "(root)";
-  if (areaRoots.includes(parts[0]) && parts.length > 2) return `${parts[0]}/${parts[1]}`;
+  if (parts.length === 1) return ROOT_AREA;
+  for (const root of areaRoots) {
+    const rest = filePath.startsWith(`${root}/`) ? filePath.slice(root.length + 1).split("/") : [];
+    if (rest.length > 1) return `${root}/${rest[0]}`;
+  }
   return parts[0];
+}
+
+function fileLabel(f) {
+  return f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
 }
 
 function categorize(filePath, risky) {
@@ -250,10 +345,13 @@ function categorize(filePath, risky) {
 }
 
 function analyze(files, config) {
-  const kept = files.filter((f) => !config.ignoreRes.some((re) => re.test(f.path)));
+  // ignore can never hide an edit to the budgets themselves.
+  const kept = files.filter((f) => f.path === CONFIG_FILE || !config.ignoreRes.some((re) => re.test(f.path)));
   for (const f of kept) {
-    f.categories = categorize(f.path, config.risky);
+    // A rename touches both sides: categorize and area-count the old path too.
+    f.categories = [...new Set([f.path, f.oldPath].filter(Boolean).flatMap((p) => categorize(p, config.risky)))];
     f.area = areaOf(f.path, config.areaRoots);
+    f.oldArea = f.oldPath ? areaOf(f.oldPath, config.areaRoots) : null;
     // Lockfiles are generated; their bulk should not eat the line budget.
     f.countedLines = f.categories.includes("lockfile") ? 0 : f.lines;
   }
@@ -265,6 +363,10 @@ function analyze(files, config) {
     const a = areas.get(f.area);
     a.files += 1;
     a.lines += f.countedLines;
+    if (f.oldArea && f.oldArea !== f.area) {
+      if (!areas.has(f.oldArea)) areas.set(f.oldArea, { files: 0, lines: 0 });
+      areas.get(f.oldArea).files += 1;
+    }
   }
 
   const riskyTouched = {};
@@ -273,12 +375,13 @@ function analyze(files, config) {
     if (touched.length > 0) riskyTouched[cat] = touched;
   }
 
-  return { files: kept, totalLines, areas, riskyTouched };
+  const countedAreas = [...areas.keys()].filter((a) => a !== ROOT_AREA);
+  return { files: kept, totalLines, areas, countedAreas, riskyTouched };
 }
 
 function evaluate(analysis, config) {
   const violations = [];
-  const { files, totalLines, areas, riskyTouched } = analysis;
+  const { files, totalLines, countedAreas, riskyTouched } = analysis;
 
   if (totalLines > config.maxLines) {
     violations.push({
@@ -292,10 +395,10 @@ function evaluate(analysis, config) {
       message: `${files.length} files touched — budget is ${config.maxFiles}.`,
     });
   }
-  if (areas.size > config.maxAreas) {
+  if (countedAreas.length > config.maxAreas) {
     violations.push({
       kind: "areas",
-      message: `${areas.size} areas touched (${[...areas.keys()].join(", ")}) — budget is ${config.maxAreas}. Several concerns are riding in one change.`,
+      message: `${countedAreas.length} areas touched (${countedAreas.join(", ")}) — budget is ${config.maxAreas}. Several concerns are riding in one change.`,
     });
   }
   for (const cat of SHIP_ALONE) {
@@ -306,22 +409,34 @@ function evaluate(analysis, config) {
     if (companionLines > config.riskyCompanionLines) {
       violations.push({
         kind: `risky:${cat}`,
-        message: `${RISKY_LABELS[cat]} touched (${riskyTouched[cat].map((f) => f.path).join(", ")}) alongside ${companionLines} other lines — budget is ${config.riskyCompanionLines}. Risky surfaces ship (nearly) alone so they can be reverted alone.`,
+        message: `${RISKY_LABELS[cat]} touched (${riskyTouched[cat].map(fileLabel).join(", ")}) alongside ${companionLines} other lines — budget is ${config.riskyCompanionLines}. Risky surfaces ship (nearly) alone so they can be reverted alone.`,
       });
     }
   }
   return violations;
 }
 
-function findTrailerOverride(cwd, logRange) {
-  if (!logRange) return null;
-  const messages = tryGit(cwd, ["log", "--format=%B%x00", logRange]);
-  if (!messages) return null;
-  for (const body of messages.split("\0")) {
+// Only the newest non-merge commit can waive the check, so an override for
+// one commit does not silently cover everything pushed after it. In CI the
+// checkout is a merge ref, and the newest non-merge commit is the PR head.
+function findTrailerOverrides(cwd, logRange) {
+  const result = { honored: null, ignored: [] };
+  const out = tryGit(cwd, ["log", "--topo-order", "--format=%h%x1f%p%x1f%s%x1f%B%x1e", logRange]);
+  if (!out) return result;
+  let seenNonMerge = false;
+  for (const record of out.split("\x1e")) {
+    const [sha, parents, subject, body] = record.replace(/^\n/, "").split("\x1f");
+    if (!sha || body === undefined) continue;
+    const isMerge = parents.trim().includes(" ");
+    const isNewest = !isMerge && !seenNonMerge;
+    if (!isMerge) seenNonMerge = true;
     const m = body.match(OVERRIDE_TRAILER);
-    if (m) return m[1].trim();
+    if (!m) continue;
+    const entry = { sha, subject, reason: m[1].trim() };
+    if (isNewest) result.honored = entry;
+    else result.ignored.push(entry);
   }
-  return null;
+  return result;
 }
 
 function suggestSplit(analysis, violations, config) {
@@ -332,7 +447,7 @@ function suggestSplit(analysis, violations, config) {
   for (const cat of SHIP_ALONE) {
     if (!violations.some((v) => v.kind === `risky:${cat}`)) continue;
     const touched = analysis.riskyTouched[cat];
-    lines.push(`  ${step}. Ship the ${RISKY_LABELS[cat]} alone: ${touched.map((f) => f.path).join(", ")}`);
+    lines.push(`  ${step}. Ship the ${RISKY_LABELS[cat]} alone: ${touched.map(fileLabel).join(", ")}`);
     touched.forEach((f) => claimed.add(f.path));
     step += 1;
   }
@@ -345,36 +460,38 @@ function suggestSplit(analysis, violations, config) {
     .filter((a) => a.files.length > 0)
     .sort((a, b) => b.lines - a.lines);
 
-  if (byArea.length > 1) {
-    for (const a of byArea) {
-      const note = a.lines > config.maxLines ? " (still over budget — split by feature within the area)" : "";
-      lines.push(`  ${step}. ${a.area}: ${a.files.length} file(s), ~${a.lines} lines${note}`);
-      step += 1;
-    }
-  } else if (byArea.length === 1) {
+  const overBudget = (a) => a.lines > config.maxLines || a.files.length > config.maxFiles;
+  if (byArea.length === 1 && overBudget(byArea[0])) {
     lines.push(
       `  ${step}. ${byArea[0].area} alone is over budget. Split by concern: refactor-only step first (no behavior change), then the behavior change; or one feature slice at a time.`,
     );
+  } else {
+    for (const a of byArea) {
+      const note = overBudget(a) ? " (still over budget — split by feature within the area)" : "";
+      lines.push(`  ${step}. ${a.area}: ${a.files.length} file(s), ~${a.lines} lines${note}`);
+      step += 1;
+    }
   }
 
   lines.push("");
   lines.push("Each step should pass chip-check on its own and be revertable on its own.");
-  lines.push('If this genuinely cannot be split (rare), override explicitly: add a "Chip-Override: <reason>" commit trailer or pass --override "<reason>". Overrides are loud on purpose.');
+  lines.push('If this genuinely cannot be split (rare), override explicitly: add a "Chip-Override: <reason>" line to the newest commit message or pass --override "<reason>". Overrides are loud on purpose.');
   return lines.join("\n");
 }
 
 function formatReport(analysis, config, sourceLabel) {
   const out = [];
   const over = (n, budget) => (n > budget ? `${n} ! (budget ${budget})` : `${n} (budget ${budget})`);
-  out.push(`chip-check · ${sourceLabel}`);
+  out.push(`chip-check · ${sourceLabel} · config: ${config.label}`);
   out.push(
-    `  lines changed: ${over(analysis.totalLines, config.maxLines)} · files: ${over(analysis.files.length, config.maxFiles)} · areas: ${over(analysis.areas.size, config.maxAreas)}`,
+    `  lines changed: ${over(analysis.totalLines, config.maxLines)} · files: ${over(analysis.files.length, config.maxFiles)} · areas: ${over(analysis.countedAreas.length, config.maxAreas)}`,
   );
 
   if (analysis.areas.size > 0) {
     out.push("  areas:");
     for (const [area, stats] of [...analysis.areas.entries()].sort((a, b) => b[1].lines - a[1].lines)) {
-      out.push(`    ${area.padEnd(24)} ${String(stats.files).padStart(3)} file(s) ${String(stats.lines).padStart(6)} lines`);
+      const note = area === ROOT_AREA ? " (not counted as an area)" : "";
+      out.push(`    ${area.padEnd(24)} ${String(stats.files).padStart(3)} file(s) ${String(stats.lines).padStart(6)} lines${note}`);
     }
   }
 
@@ -382,7 +499,10 @@ function formatReport(analysis, config, sourceLabel) {
   if (riskyCats.length > 0) {
     out.push("  risky surfaces:");
     for (const cat of riskyCats) {
-      out.push(`    ${RISKY_LABELS[cat]}: ${analysis.riskyTouched[cat].map((f) => f.path).join(", ")}`);
+      out.push(`    ${RISKY_LABELS[cat]}: ${analysis.riskyTouched[cat].map(fileLabel).join(", ")}`);
+    }
+    if (analysis.riskyTouched.config) {
+      out.push(`    note: ${CONFIG_FILE} edits apply to --range (CI) checks only once they are on the base.`);
     }
     if (analysis.riskyTouched.publicApi) {
       out.push("    note: public API / manifest files change your contract with callers — name this in the step's blast radius.");
@@ -393,20 +513,24 @@ function formatReport(analysis, config, sourceLabel) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const cwd = opts.cwd;
-
-  const repoRoot = tryGit(cwd, ["rev-parse", "--show-toplevel"]);
-  if (!repoRoot) throw new UsageError(`not a git repository: ${cwd}`);
-
-  const config = loadConfig(opts, repoRoot);
+  const repoRoot = tryGit(path.resolve(opts.cwd), ["rev-parse", "--show-toplevel"]);
+  if (!repoRoot) throw new UsageError(`not a git repository: ${opts.cwd}`);
+  // Every git call runs from the root so paths are root-relative.
+  const cwd = repoRoot;
 
   let numstatArgs;
   let logRange;
   let sourceLabel;
+  let mergeBase;
   let includeUntracked = false;
 
   if (opts.range) {
-    numstatArgs = ["diff", "--numstat", opts.range];
+    if (!opts.range.includes("..")) {
+      throw new UsageError(`--range needs <a>..<b> or <a>...<b>, got "${opts.range}"; use --base for a single ref`);
+    }
+    const [, left, right] = opts.range.match(/^(.*?)\.\.\.?(.*)$/);
+    mergeBase = resolveMergeBase(cwd, left || "HEAD", right || "HEAD");
+    numstatArgs = ["diff", ...DIFF_FLAGS, opts.range];
     logRange = opts.range.replace("...", "..");
     sourceLabel = `range ${opts.range}`;
   } else {
@@ -414,16 +538,16 @@ function main() {
     if (!base) {
       throw new UsageError("could not detect a base branch; pass --base <ref> or --range <a...b>");
     }
-    const mergeBase = tryGit(cwd, ["merge-base", base, "HEAD"]);
-    if (!mergeBase) throw new UsageError(`no merge base between ${base} and HEAD`);
-    numstatArgs = ["diff", "--numstat", mergeBase];
+    mergeBase = resolveMergeBase(cwd, base, "HEAD");
+    numstatArgs = ["diff", ...DIFF_FLAGS, mergeBase];
     logRange = `${mergeBase}..HEAD`;
     sourceLabel = `working tree vs ${base}`;
     includeUntracked = true;
   }
 
+  const config = loadConfig(opts, repoRoot, opts.range ? mergeBase : null);
   const files = parseNumstat(git(cwd, numstatArgs));
-  if (includeUntracked) files.push(...collectUntracked(cwd, repoRoot));
+  if (includeUntracked) files.push(...collectUntracked(repoRoot));
 
   const analysis = analyze(files, config);
   const violations = evaluate(analysis, config);
@@ -442,12 +566,20 @@ function main() {
   console.log("Suggested split:");
   console.log(suggestSplit(analysis, violations, config));
 
-  const override = opts.override ?? findTrailerOverride(cwd, logRange);
+  const trailers = findTrailerOverrides(cwd, logRange);
+  if (trailers.ignored.length > 0) console.log("");
+  for (const t of trailers.ignored) {
+    console.log(`Ignored Chip-Override on ${t.sha} "${t.subject}" (not on the newest commit).`);
+  }
+  const override = opts.override
+    ? { reason: opts.override, source: "--override flag" }
+    : trailers.honored && { reason: trailers.honored.reason, source: `commit ${trailers.honored.sha} "${trailers.honored.subject}"` };
   if (override) {
     console.log("");
     console.log("=".repeat(64));
     console.log(`OVERRIDE ACTIVE — budgets exceeded but explicitly waived.`);
-    console.log(`Reason: ${override}`);
+    console.log(`Reason: ${override.reason}`);
+    console.log(`Source: ${override.source}`);
     console.log("This is visible on purpose. Reviewers: treat with extra care.");
     console.log("=".repeat(64));
     process.exit(EXIT_PASS);
@@ -463,6 +595,10 @@ try {
     console.error(`chip-check: ${err.message}`);
     console.error("");
     console.error(usage());
+    process.exit(EXIT_USAGE);
+  }
+  if (err instanceof GitError) {
+    console.error(`chip-check: ${err.message}`);
     process.exit(EXIT_USAGE);
   }
   console.error(`chip-check: unexpected error: ${err?.stack ?? err}`);
