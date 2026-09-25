@@ -19,6 +19,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const EXIT_OK = 0;
+const EXIT_ERROR = 1;
 const EXIT_USAGE = 2;
 
 const PAGE_RE = /^page\.(js|jsx|ts|tsx|mdx)$/;
@@ -625,204 +626,258 @@ function parseReactRouter(files, appOf, resolveChain) {
 
 // ----------------------------------------------------------------- edges
 
-const NAV_PATTERNS = [
-  { re: /(?:href|to)=\{?["']([^"'}]+)["']\}?/g, kind: "link" },
-  // Template literals get their own patterns: ${…} contains "}" which
-  // the quoted patterns must exclude.
-  { re: /(?:href|to)=\{\s*`([^`]+)`\s*\}/g, kind: "link" },
-  { re: /router\.(?:push|replace)\(\s*["']([^"']+)["']/g, kind: "link" },
-  { re: /router\.(?:push|replace)\(\s*`([^`]+)`/g, kind: "link" },
-  { re: /navigate\(\s*["']([^"']+)["']/g, kind: "link" },
-  { re: /navigate\(\s*`([^`]+)`/g, kind: "link" },
-  { re: /(?:permanentR|r)edirect\(\s*["']([^"']+)["']/g, kind: "redirect" },
-  { re: /(?:permanentR|r)edirect\(\s*`([^`]+)`/g, kind: "redirect" },
-  { re: /NextResponse\.redirect\([^)]*["'`]([^"'`]+)["'`]/g, kind: "redirect" },
+const lineOf = (text, index) => text.slice(0, index).split("\n").length;
+
+/** Blank out comments (newlines kept, so line numbers hold). A quote never spans a line. */
+function stripComments(text) {
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      out += ch;
+      if (ch === "\\") out += text[++i] ?? "";
+      else if (ch === quote || (ch === "\n" && quote !== "`")) quote = null;
+      continue;
+    }
+    if (ch === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) {
+      const close = text[i + 1] === "/" ? text.indexOf("\n", i) : text.indexOf("*/", i + 2);
+      const stop = close === -1 ? text.length : text[i + 1] === "/" ? close : close + 2;
+      out += text.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop - 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    out += ch;
+  }
+  return out;
+}
+
+/** Text from `start` up to a top-level char in `closers`, skipping nesting and strings. */
+function scanArg(text, start, closers) {
+  let depth = 0;
+  let quote = null;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (depth === 0 && closers.includes(ch)) return text.slice(start, i);
+    else if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch) && --depth < 0) return text.slice(start, i);
+  }
+  return null;
+}
+
+/** JSX attribute value after `href=`: a quoted literal or the {expression}. */
+function attrValue(text, at) {
+  const q = text[at];
+  if (q === '"' || q === "'") {
+    const end = text.indexOf(q, at + 1);
+    return end === -1 ? null : text.slice(at, end + 1);
+  }
+  return q === "{" ? scanArg(text, at + 1, "}") : null;
+}
+
+const NAV_SITES = [
+  { re: /(?<![\w$.:-])(?:href|to)=/g, kind: "link", attr: true },
+  { re: /\brouter\.(?:push|replace)\(/g, kind: "link" },
+  { re: /(?<![\w$.])navigate\(/g, kind: "link" },
+  { re: /(?<![\w$.])(?:permanentRedirect|redirect)\(/g, kind: "redirect" },
+  { re: /\bNextResponse\.redirect\(/g, kind: "redirect" },
 ];
 
-// Expression-valued navigations (to={paths.x.getHref()}, router.push(url))
-// cannot be resolved statically — they are REPORTED, never dropped.
-const NAV_EXPR_PATTERNS = [
-  /(?:href|to)=\{([A-Za-z_$][^"'`}]*)\}/g,
-  /router\.(?:push|replace)\(\s*([A-Za-z_$][\w$.()[\] ]*)\s*[,)]/g,
-  /navigate\(\s*([A-Za-z_$][\w$.()[\] ]*)\s*[,)]/g,
-];
+/** A statically known target string, or null for an expression. */
+function literalValue(arg) {
+  const a = arg.trim();
+  let m = a.match(/^(["'])((?:\\.|(?!\1).)*)\1$/);
+  if (m) return m[2];
+  m = a.match(/^`([^`]*)`$/);
+  if (m) return m[1].startsWith("${") ? null : m[1];
+  m = a.match(/^new\s+URL\(\s*(["'`])((?:(?!\1).)*)\1/); // NextResponse.redirect(new URL("/x", req.url))
+  if (m) return m[2].startsWith("${") ? null : m[2];
+  if (a.startsWith("{")) { // href={{ pathname: "/x" }}, router.push({ pathname })
+    const pathname = objectValue(a, "pathname");
+    if (typeof pathname === "string" && !pathname.startsWith("{")) return pathname;
+  }
+  return null;
+}
 
 function normalizeTarget(raw) {
-  let t = raw.trim();
-  if (/^(https?:|mailto:|tel:|#)/.test(t)) return { external: true, value: t };
-  t = t.split(/[?#]/)[0];
-  t = t.replace(/\$\{[^}]*\}/g, ":x");
-  if (!t.startsWith("/")) return { relative: true, value: t };
+  const t0 = raw.trim();
+  if (/^[a-z][a-z\d+.-]*:/i.test(t0) || t0.startsWith("//")) {
+    const web = t0.match(/^(?:https?:)?\/\/([^/?#]+)/i);
+    return { category: "external", host: web ? web[1] : null };
+  }
+  if (t0.startsWith("#")) return { category: "anchor" };
+  // ${expr} and [param] placeholders match dynamic segments.
+  let t = t0.replace(/\$\{[^}]*\}/g, ":x").replace(/\[\[?(?:\.\.\.)?[^\]]+\]\]?/g, ":x").split(/[?#]/)[0];
+  if (!t.startsWith("/")) return { category: "relative" };
   if (t !== "/") t = t.replace(/\/$/, "");
   return { value: t };
 }
 
-function routeMatchers(routes) {
-  return routes.map((r) => {
-    const pattern = r.urlPath
-      .split("/")
-      .map((seg) => {
-        if (seg.startsWith(":")) return seg.endsWith("*") || seg.endsWith("*?") ? ".+" : "[^/]+";
-        return seg.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-      })
-      .join("/");
-    return { route: r, re: new RegExp(`^${pattern}$`) };
-  });
+function routeMatcher(route) {
+  const pattern = route.urlPath
+    .split("/")
+    .map((seg) => {
+      if (seg.startsWith(":")) return seg.endsWith("*") || seg.endsWith("*?") ? ".+" : "[^/]+";
+      return seg.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    })
+    .join("/");
+  return new RegExp(`^${pattern}$`);
 }
 
-function collectEdges({ rootDir, routes, includeShared }) {
-  const matchers = routeMatchers(routes);
-  const staticMap = new Map(routes.map((r) => [r.urlPath, r]));
+function makeResolver(routes) {
+  const exact = new Map(routes.map((r) => [r.urlPath, r]));
+  const matchers = routes.map((r) => ({ r, re: routeMatcher(r) }));
+  return (value) => exact.get(value) ?? matchers.find(({ re }) => re.test(value))?.r ?? null;
+}
+
+function makeSpecials(rootDir, nextProjects) {
+  const specials = new Map();
+  return (kind, project) => {
+    const key = `${kind}:${project ?? ""}`;
+    if (!specials.has(key)) {
+      const rel = project ? path.relative(rootDir, project) || "." : "";
+      const label = nextProjects.length > 1 && project ? `${kind} · ${rel}` : kind;
+      specials.set(key, { special: true, key, label });
+    }
+    return specials.get(key);
+  };
+}
+
+function middlewareKind(file) {
+  return /(^|\/)middleware\.(js|ts)$/.test(file) ? { kind: "middleware", project: null } : null;
+}
+
+/**
+ * Every navigation call site becomes an edge or a `dropped` entry with a
+ * category — never neither.
+ */
+function collectEdges({ rootDir, files, routes, includeShared, resolve, special }) {
   const routeDirs = routes
     .map((r) => ({ dir: path.dirname(r.file), route: r }))
     .sort((a, b) => b.dir.length - a.dir.length);
-
-  const sourceRouteFor = (file) => {
-    for (const { dir, route } of routeDirs) {
-      if (file === route.file || file.startsWith(dir + path.sep)) return route;
-    }
-    return null;
-  };
-
-  const resolveTarget = (value) => {
-    const exact = staticMap.get(value);
-    if (exact) return exact;
-    for (const { route, re } of matchers) {
-      if (re.test(value)) return route;
-    }
-    return null;
-  };
+  const sourceRouteFor = (file) =>
+    routeDirs.find(({ dir, route }) => file === route.file || file.startsWith(dir + path.sep))?.route ?? null;
 
   const edges = [];
-  const unresolved = [];
+  const dropped = [];
   const external = new Set();
   const seen = new Set();
-
-  for (const file of walkFiles(rootDir)) {
-    const text = readText(file);
-    const isMiddleware = /(^|\/)middleware\.(js|ts)$/.test(file);
-    const source = isMiddleware ? "middleware" : sourceRouteFor(file);
-    if (!source && !includeShared && !isMiddleware) {
-      // Still scan shared files so unresolved/dynamic navigation is
-      // reported rather than dropped — they just don't become edges.
-    }
-    for (const { re, kind } of NAV_PATTERNS) {
-      re.lastIndex = 0;
+  for (const file of files) {
+    const raw = readText(file);
+    if (!raw) continue;
+    const text = file.endsWith(".mdx") ? raw : stripComments(raw);
+    const owner = sourceRouteFor(file);
+    const mw = middlewareKind(file);
+    for (const site of NAV_SITES) {
+      site.re.lastIndex = 0;
       let m;
-      while ((m = re.exec(text))) {
-        const target = normalizeTarget(m[1]);
-        if (target.external) { external.add(target.value.split("/")[2] ?? target.value); continue; }
-        if (target.relative) continue; // relative hrefs: not resolvable without runtime
-        const resolved = resolveTarget(target.value);
-        const line = text.slice(0, m.index).split("\n").length;
-        if (!resolved) {
-          unresolved.push({ value: m[1], file: path.relative(rootDir, file), line });
-          continue;
+      while ((m = site.re.exec(text))) {
+        const at = m.index + m[0].length;
+        const arg = site.attr ? attrValue(text, at) : scanArg(text, at, ",)");
+        if (arg === null || !arg.trim()) continue;
+        const drop = (category, value) => dropped.push({
+          category, value: value.trim().replace(/\s+/g, " ").slice(0, 80), file: path.relative(rootDir, file), line: lineOf(text, m.index),
+        });
+        if (/^-?\d+$/.test(arg.trim())) { drop("history", arg); continue; }
+        const lit = literalValue(arg);
+        if (lit === null) { drop("expression", arg); continue; }
+        const target = normalizeTarget(lit);
+        if (target.host) external.add(target.host);
+        if (target.category) { drop(target.category, lit); continue; }
+        const resolved = resolve(target.value);
+        if (!resolved) { drop("unmatched", lit); continue; }
+        let source = mw ? special(mw.kind, mw.project) : owner;
+        if (!source) {
+          if (!includeShared) { drop("shared", lit); continue; }
+          source = special("shared");
         }
-        const src = source === "middleware" ? "middleware" : source ?? (includeShared ? "shared" : null);
-        if (!src) continue;
-        const edgeKind = isMiddleware ? "middleware" : kind;
-        const key = `${src === "middleware" || src === "shared" ? src : src.urlPath}→${resolved.urlPath}:${edgeKind}`;
+        const kind = mw ? "middleware" : site.kind;
+        const key = `${source.key ?? `${source.app}\0${source.urlPath}`}→${resolved.app}\0${resolved.urlPath}:${kind}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        edges.push({ source: src, target: resolved, kind: edgeKind });
-      }
-    }
-    for (const re of NAV_EXPR_PATTERNS) {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(text))) {
-        const line = text.slice(0, m.index).split("\n").length;
-        unresolved.push({ value: `{${m[1].trim()}}`, file: path.relative(rootDir, file), line, expr: true });
+        edges.push({ source, target: resolved, kind });
       }
     }
   }
-  return { edges, unresolved, external: [...external] };
+  return { edges, dropped, external: [...external] };
 }
 
 // next.config redirects()
-function collectConfigRedirects(rootDir, routes) {
-  const matchers = routeMatchers(routes);
+function collectConfigRedirects({ rootDir, resolve, special }) {
   const edges = [];
-  for (const name of ["next.config.js", "next.config.mjs", "next.config.ts"]) {
+  for (const name of NEXT_CONFIG_NAMES) {
     const file = path.join(rootDir, name);
     if (!existsSync(file)) continue;
     const text = readText(file);
     const re = /source\s*:\s*["'`]([^"'`]+)["'`][\s\S]{0,200}?destination\s*:\s*["'`]([^"'`]+)["'`]/g;
     let m;
     while ((m = re.exec(text))) {
-      const to = matchers.find(({ re: r }) => r.test(m[2].split(/[?#]/)[0]))?.route;
-      if (to) edges.push({ source: "middleware", target: to, kind: "config-redirect", label: m[1] });
+      const target = normalizeTarget(m[2]);
+      const to = target.value ? resolve(target.value) : null;
+      if (to) edges.push({ source: special("middleware", null), target: to, kind: "config-redirect" });
     }
   }
-  return edges;
+  return { edges, dropped: [] };
 }
 
 // --------------------------------------------------------------- mermaid
 
-function sanitizeId(s) {
-  return s.replace(/[^a-zA-Z0-9]/g, "_");
-}
+const esc = (s) => String(s).replace(/"/g, "#quot;");
 
 function emitMermaid({ routes, edges, maxLabel }) {
-  const ids = new Map();
-  routes.forEach((r, i) => ids.set(r, `r${i}`));
+  const ids = new Map(routes.map((r, i) => [r, `r${i}`]));
   const lines = ["flowchart TD"];
-
   const apps = [...new Set(routes.map((r) => r.app))];
-  for (const app of apps) {
-    const appRoutes = routes.filter((r) => r.app === app);
+  let groupId = 0;
+  apps.forEach((app, appId) => {
     const groups = new Map();
-    for (const r of appRoutes) {
+    for (const r of routes.filter((x) => x.app === app)) {
       const seg = r.urlPath === "/" ? "/" : `/${r.urlPath.split("/")[1]}`;
-      if (!groups.get(seg)) groups.set(seg, []);
+      if (!groups.has(seg)) groups.set(seg, []);
       groups.get(seg).push(r);
     }
     const indent = apps.length > 1 ? "    " : "  ";
-    if (apps.length > 1) lines.push(`  subgraph APP_${sanitizeId(app)}["${app}"]`);
-    for (const [seg, rs] of [...groups.entries()].sort()) {
+    if (apps.length > 1) lines.push(`  subgraph a${appId}["${esc(app)}"]`);
+    for (const [seg, rs] of groups) {
       const many = rs.length > 1;
-      if (many) lines.push(`${indent}subgraph G_${sanitizeId(app + seg)}["${seg}"]`);
-      for (const r of rs) {
-        const label = r.urlPath.replace(/"/g, "'");
-        lines.push(`${indent}${many ? "  " : ""}${ids.get(r)}["${label}"]`);
-      }
+      if (many) lines.push(`${indent}subgraph g${groupId++}["${esc(seg)}"]`);
+      for (const r of rs) lines.push(`${indent}${many ? "  " : ""}${ids.get(r)}["${esc(r.urlPath)}"]`);
       if (many) lines.push(`${indent}end`);
     }
     if (apps.length > 1) lines.push("  end");
-  }
+  });
 
-  const specials = new Set(edges.map((e) => e.source).filter((s) => typeof s === "string"));
-  for (const s of specials) lines.push(`  ${sanitizeId(s)}{{"${s}"}}`);
-
+  const specials = [...new Set(edges.map((e) => e.source).filter((s) => s.special))];
+  specials.forEach((s, i) => {
+    ids.set(s, `s${i}`);
+    lines.push(`  s${i}{{"${esc(s.label)}"}}`);
+  });
   for (const e of edges) {
-    const from = typeof e.source === "string" ? sanitizeId(e.source) : ids.get(e.source);
-    const to = ids.get(e.target);
-    const label = e.label ? `|"${e.label.slice(0, maxLabel).replace(/"/g, "'")}"|` : "";
-    const arrow = e.kind === "link" ? `-->${label}` : `-. ${e.kind} .->`;
-    lines.push(`  ${from} ${arrow} ${to}`);
+    const arrow = e.kind === "link" ? "-->"
+      : e.label ? `-.->|"${esc(e.label.slice(0, maxLabel))}"|` : `-. ${e.kind} .->`;
+    lines.push(`  ${ids.get(e.source)} ${arrow} ${ids.get(e.target)}`);
   }
   return lines.join("\n");
 }
 
 // ----------------------------------------------------------------- main
 
-function validate(routes, edges, mermaid) {
-  const problems = [];
-  for (const r of routes) {
-    if (!mermaid.includes(`["${r.urlPath.replace(/"/g, "'")}"]`)) {
-      problems.push(`route missing from diagram: ${r.urlPath} (${r.file})`);
-    }
-  }
-  const routeSet = new Set(routes);
-  for (const e of edges) {
-    if (!routeSet.has(e.target)) problems.push(`edge to unknown route: ${e.target?.urlPath}`);
-    if (typeof e.source !== "string" && !routeSet.has(e.source)) {
-      problems.push(`edge from unknown route: ${e.source?.urlPath}`);
-    }
-  }
-  return problems;
-}
+const NEEDS_EYES = ["unmatched", "expression", "relative"];
+const BY_DESIGN = {
+  shared: "resolved, in non-route files (--include-shared draws them)",
+  external: "external URLs",
+  anchor: "in-page #anchors",
+  history: "history steps (navigate(-1))",
+};
+
+const siteLine = (u) => `  - \`${u.value.replace(/`/g, "'")}\` at ${u.file}:${u.line}`;
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -831,7 +886,7 @@ function main() {
   const roots = detectRoots(rootDir);
   if (roots.length === 0) {
     throw new UsageError(
-      "no routers found (looked for Next.js app/ and pages/ directories and React Router config files)",
+      "no routers found (looked for Next.js app/ and pages/ directories and React Router route definitions)",
     );
   }
 
@@ -840,6 +895,7 @@ function main() {
   let slots = [];
   let intercepts = [];
   let apiRoutes = 0;
+  const files = [...walkFiles(rootDir)];
   for (const r of roots) {
     if (r.kind === "next-app") {
       const label = path.relative(rootDir, r.dir) || "app";
@@ -854,14 +910,13 @@ function main() {
       if (pages.length === 0) r.empty = true; // e.g. only pages/api
       routes.push(...pages);
     } else if (r.kind === "react-router") {
-      const allFiles = [...walkFiles(rootDir)];
       const projects = [...new Set(r.files.map((f) => nearestProject(f, rootDir)))];
       const appOf = (file) => {
         const project = nearestProject(file, rootDir);
         const rel = path.relative(rootDir, project) || ".";
         return { project, app: projects.length > 1 ? `${rel} · react-router` : "react-router" };
       };
-      const res = parseReactRouter(r.files, appOf, makeChainResolver(allFiles));
+      const res = parseReactRouter(r.files, appOf, makeChainResolver(files));
       routes.push(...res.routes);
       unresolvedRoutePaths.push(...res.unresolvedPaths.map((u) => ({
         ...u,
@@ -880,27 +935,35 @@ function main() {
   const finalRoutes = [...dedup.values()].sort((a, b) =>
     appOrder.indexOf(a.app) - appOrder.indexOf(b.app) || (a.urlPath < b.urlPath ? -1 : a.urlPath > b.urlPath ? 1 : 0));
 
-  const { edges, unresolved, external } = collectEdges({
-    rootDir, routes: finalRoutes, includeShared: opts.includeShared,
+  const nextProjects = [...new Set(roots.filter((r) => r.project).map((r) => r.project))];
+  const resolve = makeResolver(finalRoutes);
+  const special = makeSpecials(rootDir, nextProjects);
+  const nav = collectEdges({
+    rootDir, files, routes: finalRoutes, includeShared: opts.includeShared, resolve, special,
   });
-  edges.push(...collectConfigRedirects(rootDir, finalRoutes));
+  const config = collectConfigRedirects({ rootDir, resolve, special });
+  const edges = [...nav.edges, ...config.edges];
+  const dropped = [...nav.dropped, ...config.dropped];
 
   const mermaid = emitMermaid({ routes: finalRoutes, edges, maxLabel: opts.maxLabel });
-  const problems = validate(finalRoutes, edges, mermaid);
 
+  const count = (cat) => dropped.filter((u) => u.category === cat).length;
+  const needsEyes = dropped.filter((u) => NEEDS_EYES.includes(u.category));
+  const byDesign = Object.keys(BY_DESIGN).filter(count);
+  const unresolvedLine = `- **Unresolved navigations (need eyes):** ${needsEyes.length} (${NEEDS_EYES.map((c) => `${count(c)} ${c}`).join(", ")})`;
+  const notDrawnLine = `- **Not drawn by design:** ${byDesign.length ? byDesign.map((c) => `${count(c)} ${c}`).join(", ") : "none"}`;
   const report = `## Ramble report
 
 - **Routers:** ${roots.filter((r) => !r.empty).map((r) => r.kind + (r.dir ? ` (${path.relative(rootDir, r.dir)})` : "")).join(", ")}
 - **Screens:** ${finalRoutes.length} (${finalRoutes.filter((r) => r.dynamic).length} dynamic)${routes.length !== finalRoutes.length ? ` — ${routes.length - finalRoutes.length} duplicate URL(s) merged` : ""}
-- **Edges:** ${edges.length} (${edges.filter((e) => e.kind !== "link").length} redirect/middleware)
+- **Edges:** ${edges.length} (${edges.filter((e) => e.kind !== "link").length} redirect/rewrite/middleware)
 - **API route handlers (not screens):** ${apiRoutes}
 - **Parallel route slots (render inside a screen, not URLs):** ${slots.length}${slots.length ? " — " + [...new Set(slots.map((s) => s.slot))].join(", ") : ""}
 - **Intercepting routes (modals-in-place):** ${intercepts.length}${intercepts.length ? "\n" + intercepts.map((i) => `  - ${i.marker}${i.target} under ${i.from || "/"}`).join("\n") : ""}
-- **External link hosts:** ${external.length ? external.join(", ") : "none"}
-- **Unresolved route path expressions:** ${unresolvedRoutePaths.length}${unresolvedRoutePaths.length ? "\n" + unresolvedRoutePaths.slice(0, 20).map((u) => `  - \`${u.value}\` at ${u.file}:${u.line}`).join("\n") : ""}
-- **Unresolved navigations (need eyes, NOT dropped silently):** ${unresolved.length} (${unresolved.filter((u) => u.expr).length} expression-valued)
-${unresolved.slice(0, 40).map((u) => `  - \`${u.value}\` at ${u.file}:${u.line}`).join("\n")}${unresolved.length > 40 ? `\n  - …and ${unresolved.length - 40} more` : ""}
-${problems.length ? `\n**SELF-CHECK FAILURES:**\n${problems.map((p) => `- ${p}`).join("\n")}` : "\nSelf-check: every route file appears in the diagram; every edge points to an existing route."}`;
+- **External link hosts:** ${nav.external.length ? nav.external.join(", ") : "none"}
+- **Unresolved route path expressions:** ${unresolvedRoutePaths.length}${unresolvedRoutePaths.map((u) => `\n${siteLine(u)}`).join("")}
+${unresolvedLine}${NEEDS_EYES.flatMap((c) => dropped.filter((u) => u.category === c)).map((u) => `\n${siteLine(u)} (${u.category})`).join("")}
+${notDrawnLine}${byDesign.map((c) => `\n\n<details><summary>${count(c)} ${c}: ${BY_DESIGN[c]}</summary>\n\n${dropped.filter((u) => u.category === c).map(siteLine).join("\n")}\n\n</details>`).join("")}`;
 
   mkdirSync(opts.out, { recursive: true });
   writeFileSync(path.join(opts.out, "flow.mmd"), mermaid + "\n");
@@ -910,12 +973,9 @@ ${problems.length ? `\n**SELF-CHECK FAILURES:**\n${problems.map((p) => `- ${p}`)
   );
 
   console.log(`ramble · ${finalRoutes.length} screens, ${edges.length} edges → ${path.join(opts.out, "flow.md")}`);
-  console.log(report.split("\n").slice(2, 10).join("\n"));
+  console.log(report.split("\n").filter((l) => /^- \*\*(Routers|Screens|Edges|Unresolved route)/.test(l)).join("\n"));
+  console.log(`${unresolvedLine}\n${notDrawnLine}`);
   if (opts.thumbs) renderThumbs(finalRoutes, opts);
-  if (problems.length) {
-    console.error(`ramble: self-check failed:\n${problems.join("\n")}`);
-    process.exit(1);
-  }
 }
 
 try {
@@ -928,5 +988,5 @@ try {
     process.exit(EXIT_USAGE);
   }
   console.error(`ramble: unexpected error: ${err?.stack ?? err}`);
-  process.exit(EXIT_USAGE);
+  process.exit(EXIT_ERROR);
 }

@@ -77,12 +77,12 @@ test("next app router: groups, dynamic, catch-alls, slots, intercepts, privates"
   assert.match(md, /\(\.\)photo under \/feed/);
   assert.match(md, /API route handlers[^\n]*:\*\* 1/);
 
-  // Edges: link / → /dashboard; template literal → /posts/:id; redirect dashed; middleware dashed.
-  assert.match(mmd, /r\d+ --> r\d+/);
-  assert.match(mmd, /-\. redirect \.->/);
-  assert.match(mmd, /middleware\{\{"middleware"\}\}/);
-  assert.match(mmd, /-\. middleware \.->/);
-  assert.match(md, /Self-check: every route file appears/);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "/ -link-> /dashboard",
+    "/dashboard -link-> /posts/:id",
+    "/login -redirect-> /dashboard",
+    "middleware -middleware-> /login",
+  ]);
 });
 
 test("edge targets resolve template literals against dynamic routes", () => {
@@ -93,7 +93,7 @@ test("edge targets resolve template literals against dynamic routes", () => {
   });
   const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(mmd, /r\d+ --> r\d+/);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /items/:itemId"]);
 });
 
 test("next pages router: index, nested, dynamic; _app and api excluded", () => {
@@ -209,22 +209,21 @@ test("expression-valued navigations are reported, not dropped", () => {
   });
   const { code, md } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(md, /Unresolved navigations[^:]*:\*\* 2 \(2 expression-valued\)/);
-  assert.match(md, /\{paths\.app\.getHref\(\)\}/);
-  assert.match(md, /\{dynamicUrl\}/);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 2 \(0 unmatched, 2 expression, 0 relative\)/);
+  assert.match(md, /`paths\.app\.getHref\(\)` at app\/page\.tsx:1 \(expression\)/);
+  assert.match(md, /`dynamicUrl` at app\/page\.tsx:2 \(expression\)/);
 });
 
-test("every route file appears in the diagram and every edge resolves (self-check)", () => {
+test("a link to a missing route is reported as unmatched with file:line, never drawn", () => {
   const root = makeApp("selfcheck", {
     "package.json": "{}",
     "app/page.tsx": `export default () => <a href="/a">a</a>`,
     "app/a/page.tsx": `export default () => <a href="/missing">gone</a>`,
   });
-  const { code, md } = runRamble(root);
+  const { code, md, mmd } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(md, /Self-check: every route file appears/);
-  // /missing has no route: must land in unresolved, never in the diagram.
-  assert.match(md, /`\/missing` at/);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /a"]);
+  assert.match(md, /`\/missing` at app\/a\/page\.tsx:1 \(unmatched\)/);
 });
 
 test("bundled grok-chat fixture maps to its documented shape", () => {
@@ -236,8 +235,9 @@ test("bundled grok-chat fixture maps to its documented shape", () => {
   assert.match(md, /Screens:\*\* 11/);
   assert.match(md, /Parallel route slots[^\n]*:\*\* 1 — @history/);
   assert.match(md, /\(\.\)share under \/c\/:chatId/);
-  assert.match(md, /-\. middleware \.->/);
-  assert.match(md, /Self-check: every route file appears/);
+  assert.match(md, /Edges:\*\* 18 \(1 redirect/);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 0/);
+  assert.ok(graph(readFileSync(path.join(out, "flow.mmd"), "utf8")).edges.includes("middleware -middleware-> /login"));
 });
 
 test("no routers found is a usage error", () => {
@@ -398,4 +398,86 @@ test("react-router: path chains through a $-named config resolve", () => {
   const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
   assert.deepEqual(graph(mmd).labels, ["/home"]);
+});
+
+const NEXT_PKG = `{"dependencies":{"next":"15"}}`;
+
+test("a middleware redirect survives later quoted strings (config.matcher)", () => {
+  const root = makeApp("mwmatcher", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/login/page.tsx": "x",
+    "src/middleware.ts": `import { NextResponse } from "next/server";
+      export function middleware(req) {
+        if (!auth) return NextResponse.redirect(new URL("/login", req.url));
+        if (x) return NextResponse.rewrite(new URL("/other", req.url));
+      }
+      export const config = { matcher: ["/((?!api|_next).*)"] };`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["middleware -middleware-> /login"]);
+});
+
+test("every navigation call site is an edge or a categorized entry with file:line", () => {
+  const root = makeApp("categories", {
+    "package.json": "{}",
+    "app/a/page.tsx": "x",
+    "app/page.tsx": `export default function P() {
+  const navigate = useNavigate();
+  navigate(-1);
+  router.push({ pathname: "/a", query: { tab: 1 } });
+  return <>
+    <Link href={{ pathname: "/a" }}>obj</Link>
+    <Link href={cond ? "/a" : "/b"}>ternary</Link>
+    <Link href={\`\${base}/a\`}>base</Link>
+    <Link to="../a">rel</Link>
+    <a href="#top">anchor</a>
+    <a href="mailto:x@y.z">mail</a>
+    <a href="//cdn.example.com/x">cdn</a>
+    <a href="https://example.com/y">ext</a>
+    <a href="/gone">missing</a>
+  </>;
+}`,
+  });
+  const { md, mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /a"]);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 4 \(1 unmatched, 2 expression, 1 relative\)/);
+  assert.match(md, /`cond \? "\/a" : "\/b"` at app\/page\.tsx:7 \(expression\)/);
+  assert.match(md, /`'\$\{base\}\/a'` at app\/page\.tsx:8 \(expression\)/);
+  assert.match(md, /`\.\.\/a` at app\/page\.tsx:9 \(relative\)/);
+  assert.match(md, /`\/gone` at app\/page\.tsx:14 \(unmatched\)/);
+  assert.match(md, /Not drawn by design:\*\* 3 external, 1 anchor, 1 history/);
+  assert.match(md, /External link hosts:\*\* cdn\.example\.com, example\.com\n/);
+  assert.match(md, /`-1` at app\/page\.tsx:3/);
+});
+
+test("comments and look-alike attributes are not navigations", () => {
+  const root = makeApp("lookalike", {
+    "package.json": "{}",
+    "app/a/page.tsx": "x",
+    "app/page.tsx": `// <Link href="/a">old</Link>
+/* router.push("/a") */
+export default () => <>
+  {/* <a href="/a">x</a> */}
+  <div data-href="/a" />
+  <svg><use xlink:href="#icon" /></svg>
+  <p>see https://example.com/docs</p>
+</>;`,
+  });
+  const { md, mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, []);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 0/);
+  assert.match(md, /Not drawn by design:\*\* none/);
+});
+
+test("the console summary always includes the unresolved line", () => {
+  const root = makeApp("console", {
+    "package.json": "{}",
+    "app/page.tsx": `export default () => <a href="/nope">x</a>`,
+    "app/feed/(.)photo/page.tsx": "x",
+    "app/feed/(..)(..)x/page.tsx": "x",
+    "app/feed/page.tsx": "x",
+  });
+  const { out } = runRamble(root);
+  assert.match(out, /Unresolved navigations \(need eyes\):\*\* 1 \(1 unmatched/);
 });
