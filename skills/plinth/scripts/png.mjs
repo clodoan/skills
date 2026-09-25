@@ -62,8 +62,11 @@ export function decodePng(buf) {
   return { width, height, channels, pixels };
 }
 
-/** Returns [r, g, b, a] at (x, y). */
+/** Returns [r, g, b, a] at integer (x, y); throws outside the image. */
 export function getPixel(img, x, y) {
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= img.width || y >= img.height) {
+    throw new RangeError(`pixel (${x}, ${y}) outside ${img.width}×${img.height} image`);
+  }
   const i = (y * img.width + x) * img.channels;
   const p = img.pixels;
   switch (img.channels) {

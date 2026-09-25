@@ -135,10 +135,10 @@ test("fidelity: no page pixels under island, status bar, or home indicator", opt
     "page top marker should start exactly at the safe-area top",
   );
 
-  // Bottom band: no page pixels below the content rect.
+  // Bottom band: the page's last rows (blue marker) stop at the content
+  // rect. The band itself continues the page's edge color (red here).
   const bottomRegion = { x: 0, y: cr.y + cr.height + 1, width: d.pt.width, height: d.safeBottom - 2 };
   assert.ok(!regionHasColor(img, d, bottomRegion, MARKER_BOTTOM), "page bottom marker leaked into the home-indicator region");
-  assert.ok(!regionHasColor(img, d, bottomRegion, HERO), "page content leaked into the home-indicator region");
 
   // Island interior is solid black.
   const isl = d.island;
@@ -564,7 +564,7 @@ test("--scroll verifies frame 0 and colors its bottom band from the first screen
     Math.round((PAD + d.bezel + ptY) / (size.height + 2 * PAD) * img.height));
   // First screen ends in the red hero; the page itself ends in green.
   const band = at(30, d.pt.height - 17);
-  assert.ok(colorDistance(band, [34, 197, 94, 255]) > 80, `bottom band ${band} continues the page end (green), not the first screen`);
+  assert.ok(colorDistance(band, HERO) <= 30, `bottom band ${band} should continue the first screen (red), not the page end`);
 });
 
 test("--scroll writes a GIF for an upper-case .GIF path", ffOpts, () => {
@@ -586,4 +586,30 @@ test("an ffmpeg failure mid-encode exits 3 with its message and leaves no output
   assert.match(res.out, /ffmpeg failed: encoder exploded/);
   assert.doesNotMatch(res.out, /node:events|EPIPE|at .*\(/);
   assert.ok(!existsSync(out));
+});
+
+test("safe-area bands use the most common edge color, never an average", opts, () => {
+  const d = DEVICES["iphone-16-pro"];
+  const res = render("split", [`${baseUrl}/split`, "--device", "iphone-16-pro"]);
+  assert.equal(res.code, 0, res.out);
+  for (const [x, y] of [[d.pt.width / 2, 3], [70, d.pt.height - 17]]) {
+    const band = pixelAt(res.img, d, x, y);
+    const pure = Math.min(colorDistance(band, [0, 0, 0, 255]), colorDistance(band, [255, 255, 255, 255]));
+    assert.ok(pure <= 8, `band ${band} at ${x},${y} is not a page color`);
+  }
+});
+
+test("spec-overlay places the content rect for the rendered mode", async () => {
+  const { overlayRects } = await import("./spec-overlay.mjs");
+  const d = DEVICES["iphone-16-pro"];
+  const content = (mode) => overlayRects(d, mode, PAD, d.dpr).find((r) => r.label.startsWith("content"));
+  assert.equal(content("standalone").y, (PAD + d.bezel + d.safeTop) * d.dpr);
+  assert.equal(content("safari").y, (PAD + d.bezel + d.statusBar) * d.dpr);
+  assert.equal(content("safari").h, contentRect(d, "safari").height * d.dpr);
+});
+
+test("getPixel rejects coordinates outside the image", () => {
+  const img = { width: 2, height: 2, channels: 4, pixels: Buffer.alloc(16) };
+  assert.deepEqual(getPixel(img, 1, 1), [0, 0, 0, 0]);
+  for (const [x, y] of [[2, 0], [0, -1], [0.5, 0], [NaN, 0]]) assert.throws(() => getPixel(img, x, y), RangeError);
 });

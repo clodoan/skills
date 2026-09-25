@@ -228,17 +228,26 @@ function stageHtml(frames, opts) {
   </style></head><body><div id="stage">${frames.join("\n")}</div></body></html>`;
 }
 
-/** Average color + relative luminance of a horizontal strip of a capture. */
+/**
+ * Most common color of a horizontal strip (5-bit buckets, averaged within
+ * the winner) + relative luminance. An average invents colors the page
+ * never shows (black|white header → grey band).
+ */
 function stripStats(img, fromY, toY) {
-  let r = 0, g = 0, b = 0, count = 0;
+  const buckets = new Map();
   const step = Math.max(1, Math.floor(img.width / 64));
   for (let y = fromY; y < toY; y++) {
     for (let x = 0; x < img.width; x += step) {
-      const p = getPixel(img, x, y);
-      r += p[0]; g += p[1]; b += p[2]; count++;
+      const [r, g, b] = getPixel(img, x, y);
+      const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      const bucket = buckets.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
+      bucket.n++; bucket.r += r; bucket.g += g; bucket.b += b;
+      buckets.set(key, bucket);
     }
   }
-  r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
+  let best = null;
+  for (const bucket of buckets.values()) if (!best || bucket.n > best.n) best = bucket;
+  const [r, g, b] = [best.r, best.g, best.b].map((v) => Math.round(v / best.n));
   const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
   return { color: `rgb(${r},${g},${b})`, rgb: [r, g, b, 255], lum };
 }
