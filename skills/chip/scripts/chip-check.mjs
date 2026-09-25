@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, lstatSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -133,9 +133,21 @@ function parseArgs(argv) {
 }
 
 class UsageError extends Error {}
+class GitError extends Error {}
 
+// core.quotePath=false plus -z keeps non-ASCII and odd paths verbatim.
 function git(cwd, args) {
-  return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  try {
+    return execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const detail = String(err.stderr ?? "").trim().split("\n")[0] || err.message;
+    throw new GitError(`git ${args.join(" ")} failed: ${detail}`);
+  }
 }
 
 function tryGit(cwd, args) {
@@ -144,6 +156,15 @@ function tryGit(cwd, args) {
   } catch {
     return null;
   }
+}
+
+// Diff flags that ignore user config (diff.renames, external diff, textconv).
+const DIFF_FLAGS = ["--numstat", "-z", "-M", "--no-ext-diff", "--no-textconv", "--no-color"];
+
+function shallowHint(cwd) {
+  return tryGit(cwd, ["rev-parse", "--is-shallow-repository"]) === "true"
+    ? " This is a shallow clone; fetch full history (actions/checkout: fetch-depth: 0)."
+    : "";
 }
 
 function globToRegExp(glob) {
@@ -189,26 +210,22 @@ function detectBase(cwd) {
   return null;
 }
 
-// numstat rename forms: "dir/{old => new}/file.ts" or "old.ts => new.ts"
-function normalizePath(p) {
-  if (!p.includes(" => ")) return p;
-  const braced = p.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
-  if (braced) return (braced[1] + braced[3] + braced[4]).replace(/\/{2,}/g, "/");
-  return p.split(" => ").pop();
-}
-
+// `numstat -z` records: "added\tdeleted\tpath\0", or for a rename
+// "added\tdeleted\t\0old\0new\0".
 function parseNumstat(text) {
   const files = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    const [added, deleted, ...rest] = line.split("\t");
-    const filePath = normalizePath(rest.join("\t"));
+  const tokens = text.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    if (!tokens[i]) continue;
+    const [added, deleted, ...rest] = tokens[i].split("\t");
+    let filePath = rest.join("\t");
+    let oldPath = null;
+    if (filePath === "") {
+      oldPath = tokens[++i];
+      filePath = tokens[++i];
+    }
     const binary = added === "-" || deleted === "-";
-    files.push({
-      path: filePath,
-      lines: binary ? 0 : Number(added) + Number(deleted),
-      binary,
-    });
+    files.push({ path: filePath, oldPath, lines: binary ? 0 : Number(added) + Number(deleted), binary });
   }
   return files;
 }
@@ -218,19 +235,20 @@ function looksBinary(buf) {
   return slice.includes(0);
 }
 
-function collectUntracked(cwd, repoRoot) {
-  const out = tryGit(cwd, ["ls-files", "--others", "--exclude-standard", "--full-name"]);
-  if (!out) return [];
-  return out.split("\n").filter(Boolean).map((p) => {
-    try {
-      const buf = readFileSync(path.join(repoRoot, p));
-      if (looksBinary(buf)) return { path: p, lines: 0, binary: true };
-      const text = buf.toString("utf8");
-      const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-      return { path: p, lines, binary: false };
-    } catch {
-      return { path: p, lines: 0, binary: true };
-    }
+// Run from the repo root: ls-files only lists files under its cwd.
+function collectUntracked(repoRoot) {
+  const out = git(repoRoot, ["ls-files", "-z", "--others", "--exclude-standard"]);
+  return out.split("\0").filter(Boolean).map((p) => {
+    const full = path.join(repoRoot, p);
+    const stat = lstatSync(full, { throwIfNoEntry: false });
+    // git diffs a symlink as one line: its target path.
+    if (stat?.isSymbolicLink()) return { path: p, oldPath: null, lines: 1, binary: false };
+    if (!stat?.isFile()) return { path: p, oldPath: null, lines: 0, binary: true };
+    const buf = readFileSync(full);
+    if (looksBinary(buf)) return { path: p, oldPath: null, lines: 0, binary: true };
+    const text = buf.toString("utf8");
+    const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+    return { path: p, oldPath: null, lines, binary: false };
   });
 }
 
@@ -239,6 +257,10 @@ function areaOf(filePath, areaRoots) {
   if (parts.length === 1) return "(root)";
   if (areaRoots.includes(parts[0]) && parts.length > 2) return `${parts[0]}/${parts[1]}`;
   return parts[0];
+}
+
+function fileLabel(f) {
+  return f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
 }
 
 function categorize(filePath, risky) {
@@ -252,8 +274,10 @@ function categorize(filePath, risky) {
 function analyze(files, config) {
   const kept = files.filter((f) => !config.ignoreRes.some((re) => re.test(f.path)));
   for (const f of kept) {
-    f.categories = categorize(f.path, config.risky);
+    // A rename touches both sides: categorize and area-count the old path too.
+    f.categories = [...new Set([f.path, f.oldPath].filter(Boolean).flatMap((p) => categorize(p, config.risky)))];
     f.area = areaOf(f.path, config.areaRoots);
+    f.oldArea = f.oldPath ? areaOf(f.oldPath, config.areaRoots) : null;
     // Lockfiles are generated; their bulk should not eat the line budget.
     f.countedLines = f.categories.includes("lockfile") ? 0 : f.lines;
   }
@@ -265,6 +289,10 @@ function analyze(files, config) {
     const a = areas.get(f.area);
     a.files += 1;
     a.lines += f.countedLines;
+    if (f.oldArea && f.oldArea !== f.area) {
+      if (!areas.has(f.oldArea)) areas.set(f.oldArea, { files: 0, lines: 0 });
+      areas.get(f.oldArea).files += 1;
+    }
   }
 
   const riskyTouched = {};
@@ -306,7 +334,7 @@ function evaluate(analysis, config) {
     if (companionLines > config.riskyCompanionLines) {
       violations.push({
         kind: `risky:${cat}`,
-        message: `${RISKY_LABELS[cat]} touched (${riskyTouched[cat].map((f) => f.path).join(", ")}) alongside ${companionLines} other lines — budget is ${config.riskyCompanionLines}. Risky surfaces ship (nearly) alone so they can be reverted alone.`,
+        message: `${RISKY_LABELS[cat]} touched (${riskyTouched[cat].map(fileLabel).join(", ")}) alongside ${companionLines} other lines — budget is ${config.riskyCompanionLines}. Risky surfaces ship (nearly) alone so they can be reverted alone.`,
       });
     }
   }
@@ -332,7 +360,7 @@ function suggestSplit(analysis, violations, config) {
   for (const cat of SHIP_ALONE) {
     if (!violations.some((v) => v.kind === `risky:${cat}`)) continue;
     const touched = analysis.riskyTouched[cat];
-    lines.push(`  ${step}. Ship the ${RISKY_LABELS[cat]} alone: ${touched.map((f) => f.path).join(", ")}`);
+    lines.push(`  ${step}. Ship the ${RISKY_LABELS[cat]} alone: ${touched.map(fileLabel).join(", ")}`);
     touched.forEach((f) => claimed.add(f.path));
     step += 1;
   }
@@ -382,7 +410,7 @@ function formatReport(analysis, config, sourceLabel) {
   if (riskyCats.length > 0) {
     out.push("  risky surfaces:");
     for (const cat of riskyCats) {
-      out.push(`    ${RISKY_LABELS[cat]}: ${analysis.riskyTouched[cat].map((f) => f.path).join(", ")}`);
+      out.push(`    ${RISKY_LABELS[cat]}: ${analysis.riskyTouched[cat].map(fileLabel).join(", ")}`);
     }
     if (analysis.riskyTouched.publicApi) {
       out.push("    note: public API / manifest files change your contract with callers — name this in the step's blast radius.");
@@ -393,10 +421,10 @@ function formatReport(analysis, config, sourceLabel) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const cwd = opts.cwd;
-
-  const repoRoot = tryGit(cwd, ["rev-parse", "--show-toplevel"]);
-  if (!repoRoot) throw new UsageError(`not a git repository: ${cwd}`);
+  const repoRoot = tryGit(path.resolve(opts.cwd), ["rev-parse", "--show-toplevel"]);
+  if (!repoRoot) throw new UsageError(`not a git repository: ${opts.cwd}`);
+  // Every git call runs from the root so paths are root-relative.
+  const cwd = repoRoot;
 
   const config = loadConfig(opts, repoRoot);
 
@@ -406,7 +434,7 @@ function main() {
   let includeUntracked = false;
 
   if (opts.range) {
-    numstatArgs = ["diff", "--numstat", opts.range];
+    numstatArgs = ["diff", ...DIFF_FLAGS, opts.range];
     logRange = opts.range.replace("...", "..");
     sourceLabel = `range ${opts.range}`;
   } else {
@@ -414,16 +442,26 @@ function main() {
     if (!base) {
       throw new UsageError("could not detect a base branch; pass --base <ref> or --range <a...b>");
     }
+    if (tryGit(cwd, ["rev-parse", "--verify", "-q", `${base}^{commit}`]) === null) {
+      throw new UsageError(`unknown base ref: ${base}`);
+    }
     const mergeBase = tryGit(cwd, ["merge-base", base, "HEAD"]);
-    if (!mergeBase) throw new UsageError(`no merge base between ${base} and HEAD`);
-    numstatArgs = ["diff", "--numstat", mergeBase];
+    if (!mergeBase) throw new GitError(`no merge base between ${base} and HEAD.${shallowHint(cwd)}`);
+    numstatArgs = ["diff", ...DIFF_FLAGS, mergeBase];
     logRange = `${mergeBase}..HEAD`;
     sourceLabel = `working tree vs ${base}`;
     includeUntracked = true;
   }
 
-  const files = parseNumstat(git(cwd, numstatArgs));
-  if (includeUntracked) files.push(...collectUntracked(cwd, repoRoot));
+  let numstat;
+  try {
+    numstat = git(cwd, numstatArgs);
+  } catch (err) {
+    if (err instanceof GitError) err.message += shallowHint(cwd);
+    throw err;
+  }
+  const files = parseNumstat(numstat);
+  if (includeUntracked) files.push(...collectUntracked(repoRoot));
 
   const analysis = analyze(files, config);
   const violations = evaluate(analysis, config);
@@ -463,6 +501,10 @@ try {
     console.error(`chip-check: ${err.message}`);
     console.error("");
     console.error(usage());
+    process.exit(EXIT_USAGE);
+  }
+  if (err instanceof GitError) {
+    console.error(`chip-check: ${err.message}`);
     process.exit(EXIT_USAGE);
   }
   console.error(`chip-check: unexpected error: ${err?.stack ?? err}`);

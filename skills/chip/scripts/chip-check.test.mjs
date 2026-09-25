@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,8 @@ function makeRepo(t) {
   sh(dir, "git", ["init", "-q", "-b", "main"]);
   sh(dir, "git", ["config", "user.email", "chip@test.invalid"]);
   sh(dir, "git", ["config", "user.name", "chip test"]);
+  // Keep the developer's global git config from changing results.
+  sh(dir, "git", ["config", "commit.gpgsign", "false"]);
   write(dir, "README.md", "# fixture\n");
   commit(dir, "seed");
   return dir;
@@ -34,11 +36,10 @@ function commit(repo, message) {
   sh(repo, "git", ["commit", "-q", "-m", message]);
 }
 
-function runChip(repo, args = []) {
-  const res = spawnSync(process.execPath, [CLI, "--base", "main", ...args], {
-    cwd: repo,
-    encoding: "utf8",
-  });
+// Pass { base: null } to skip the default --base main (e.g. with --range).
+function runChip(repo, args = [], { base = "main", cwd = repo } = {}) {
+  const baseArgs = base ? ["--base", base] : [];
+  const res = spawnSync(process.execPath, [CLI, ...baseArgs, ...args], { cwd, encoding: "utf8" });
   return { code: res.status, out: res.stdout + res.stderr };
 }
 
@@ -189,12 +190,8 @@ test("--range checks a committed range instead of the working tree", (t) => {
   commit(repo, "big committed change");
   // dirty working tree noise should not be part of a --range check
   write(repo, "src/uncommitted.ts", lines(5));
-  const res = spawnSync(process.execPath, [CLI, "--range", "main...HEAD"], {
-    cwd: repo,
-    encoding: "utf8",
-  });
-  const out = res.stdout + res.stderr;
-  assert.equal(res.status, 1, out);
+  const { code, out } = runChip(repo, ["--range", "main...HEAD"], { base: null });
+  assert.equal(code, 1, out);
   assert.match(out, /FAIL/);
   assert.doesNotMatch(out, /uncommitted\.ts/);
 });
@@ -208,14 +205,94 @@ test("untracked files count toward the working-tree diff", (t) => {
   assert.match(out, /budget is 300/);
 });
 
-test("renamed files are normalized and counted once", (t) => {
+test("renames count as zero lines even when diff.renames=false", (t) => {
   const repo = makeRepo(t);
   write(repo, "src/old-name.ts", lines(50));
   commit(repo, "add file on main");
+  sh(repo, "git", ["config", "diff.renames", "false"]);
   sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
   sh(repo, "git", ["mv", "src/old-name.ts", "src/new-name.ts"]);
   commit(repo, "rename");
   const { code, out } = runChip(repo);
   assert.equal(code, 0, out);
-  assert.match(out, /PASS/);
+  assert.match(out, /lines changed: 0 .* files: 1 /);
+});
+
+test("a rename counts the areas and risky categories of both paths", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "packages/a/z.ts", lines(50));
+  write(repo, "db/migrations/001.sql", "create table t (id int);\n");
+  commit(repo, "base");
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  mkdirSync(path.join(repo, "packages/b"));
+  mkdirSync(path.join(repo, "db/archive"));
+  sh(repo, "git", ["mv", "packages/a/z.ts", "packages/b/z.ts"]);
+  sh(repo, "git", ["mv", "db/migrations/001.sql", "db/archive/001.sql"]);
+  write(repo, "src/feature.ts", lines(100));
+  commit(repo, "move things");
+  const { code, out } = runChip(repo);
+  assert.equal(code, 1, out);
+  assert.match(out, /packages\/a +1 file/);
+  assert.match(out, /packages\/b +1 file/);
+  assert.match(out, /migration touched \(db\/migrations\/001\.sql → db\/archive\/001\.sql\)/);
+});
+
+test("untracked files outside the current subdirectory still count", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "src/a.ts", "x\n");
+  commit(repo, "src");
+  write(repo, "docs/big.md", lines(400));
+  const { code, out } = runChip(repo, [], { cwd: path.join(repo, "src") });
+  assert.equal(code, 1, out);
+  assert.match(out, /400 lines changed/);
+});
+
+test("non-ASCII paths are read verbatim", (t) => {
+  const repo = makeRepo(t);
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/café.ts", lines(5));
+  write(repo, "apps/café/pnpm-lock.yaml", lines(2000, "dep"));
+  commit(repo, "unicode");
+  write(repo, "src/naïve.ts", lines(7)); // untracked
+  const { code, out } = runChip(repo);
+  assert.equal(code, 0, out);
+  assert.match(out, /lines changed: 12 /);
+  assert.doesNotMatch(out, /"src|"apps/);
+  assert.match(out, /lockfile \/ dependency change: apps\/café\/pnpm-lock\.yaml/);
+});
+
+test("untracked names with leading spaces and symlinks count like git would", (t) => {
+  const repo = makeRepo(t);
+  write(repo, " lead.ts", lines(400));
+  const outside = path.join(mkdtempSync(path.join(tmpdir(), "chip-out-")), "big.txt");
+  t.after(() => rmSync(path.dirname(outside), { recursive: true, force: true }));
+  writeFileSync(outside, lines(5000));
+  symlinkSync(outside, path.join(repo, "link.txt"));
+  const { code, out } = runChip(repo);
+  assert.equal(code, 1, out);
+  assert.match(out, /401 lines changed/);
+});
+
+test("git failures exit 2 with a one-line message, not a stack trace", (t) => {
+  const repo = makeRepo(t);
+  const { code, out } = runChip(repo, ["--range", "nope...HEAD"], { base: null });
+  assert.equal(code, 2, out);
+  assert.match(out, /chip-check: git diff .* failed: fatal:/);
+  assert.doesNotMatch(out, /\n\s+at /);
+});
+
+test("a shallow clone without the merge base gets a fetch-depth hint", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "a.ts", lines(3));
+  commit(repo, "main 2");
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "b.ts", lines(3));
+  commit(repo, "feature");
+  const clone = mkdtempSync(path.join(tmpdir(), "chip-shallow-"));
+  t.after(() => rmSync(clone, { recursive: true, force: true }));
+  sh(tmpdir(), "git", ["clone", "-q", "--depth=1", "--no-single-branch", `file://${repo}`, clone]);
+  sh(clone, "git", ["checkout", "-q", "feature"]);
+  const { code, out } = runChip(clone, ["--range", "origin/main...HEAD"], { base: null });
+  assert.equal(code, 2, out);
+  assert.match(out, /shallow clone.*fetch-depth: 0/);
 });
