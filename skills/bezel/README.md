@@ -9,13 +9,13 @@ the shot into a clean device frame generated as plain CSS (rounded
 bodies, camera pill, browser chrome dots — no copyrighted vendor
 artwork). Output is PNG, or a scrolled mp4/gif via ffmpeg.
 
-![Next.js App Router playground on phone, tablet and laptop frames](assets/app-router-multi-device.png)
+![grok.com (logged out) on phone, tablet and laptop frames, dark](assets/grok-com-multi-device-dark.png)
 
 ## Quick start
 
 ```bash
 cd skills/bezel && npm install        # playwright-core, one dependency
-node scripts/bezel.mjs https://vercel.com --device iphone-15-pro --dark
+node scripts/bezel.mjs https://grok.com --device iphone-15-pro --dark
 ```
 
 Requires Node ≥ 18 and an installed Chrome/Chromium (playwright-core
@@ -23,10 +23,13 @@ drives it via the `chrome` channel — no browser download; set
 `BEZEL_BROWSER=/path/to/chrome` to override). ffmpeg only for `--scroll`.
 
 <p>
-  <img alt="vercel.com framed as iPhone 15 Pro, dark" src="assets/vercel-iphone-15-pro-dark.png" width="300" />
+  <img alt="grok.com framed as iPhone 15 Pro, dark" src="assets/grok-com-iphone-15-pro-dark.png" width="300" />
   &nbsp;
-  <img alt="Vercel Commerce in a browser window frame with the cookie banner hidden via --hide" src="assets/commerce-browser-light.png" width="560" />
+  <img alt="grok.com in a browser window frame, light" src="assets/grok-com-browser-light.png" width="560" />
 </p>
+
+All showcase shots are public, logged-out pages (captures run in a
+fresh browser context, so there is never a session to leak).
 
 ## Devices
 
@@ -71,6 +74,8 @@ Every single-device run checks itself and exits 1 on failure:
 
 | Site | Run | Result / findings |
 | --- | --- | --- |
+| [grok.com](https://grok.com) (logged out) | `iphone-15-pro --dark`, `--devices iphone-15-pro,ipad-pro-11,macbook-14 --dark`, `browser --frame light` | Clean; responsive layout differences visible per device; all checks pass. Showcase images above come from these runs. |
+| x.ai / docs.x.ai / console.x.ai | `browser` | **Finding:** blocked for this test machine's egress (Cloudflare "you have been blocked" page rendered; checks passed because the block page really rendered). Re-run from a normal network to capture these. |
 | [vercel.com](https://vercel.com) | `iphone-15-pro --dark` | Clean; dark scheme respected; all checks pass. |
 | [app-router.vercel.app](https://app-router.vercel.app) (Next.js App Router playground) | `--devices iphone-15-pro,ipad-pro-11,macbook-14 --dark` | Multi-device row, 6410×2692 @2x. |
 | [commerce-shopify.vercel.app](https://commerce-shopify.vercel.app) (Vercel Commerce) | `browser --frame light`, `--scroll` mp4 | Real cookie banner hidden with `--hide '[class*="FeatureBar"]'`; product grid renders empty because the demo's Shopify backend returns no products — an app-state issue Bezel can't fix, look at your output. 61-frame scroll mp4 verified with ffprobe. |
