@@ -1,0 +1,5 @@
+{
+  "name": "grok-chat-fixture",
+  "private": true,
+  "description": "FIXTURE: a small route tree shaped like a Grok-style chat product, for map demos and thumbnails. Not xAI code — hand-written mock screens only."
+}
