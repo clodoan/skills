@@ -26,6 +26,16 @@ function launchOptions() {
   return executablePath ? { executablePath, args } : { channel: "chrome", args };
 }
 
+/** True when the browser the CLI would use can be launched. */
+export async function browserAvailable() {
+  try {
+    await (await chromium.launch(launchOptions())).close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function withBrowser(fn) {
   let browser;
   try {

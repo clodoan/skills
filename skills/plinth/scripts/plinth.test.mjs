@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEVICES, frameSize, screenRect, contentRect } from "./devices.mjs";
 import { decodePng, getPixel, pngSize, colorDistance } from "./png.mjs";
+import { browserAvailable } from "./capture.mjs";
 
 const CLI = fileURLToPath(new URL("./plinth.mjs", import.meta.url));
 const PAD = 48;
@@ -19,12 +20,13 @@ const MARKER_TOP = [0, 255, 0, 255];
 const MARKER_BOTTOM = [0, 0, 255, 255];
 const HERO = [225, 29, 72, 255];
 
-const hasChrome =
-  spawnSync("google-chrome", ["--version"], { stdio: "ignore" }).status === 0 ||
-  spawnSync("google-chrome-stable", ["--version"], { stdio: "ignore" }).status === 0 ||
-  Boolean(process.env.PLINTH_BROWSER);
+// Same launch path as the CLI, so a Chrome the CLI can drive is never
+// skipped. PLINTH_REQUIRE_BROWSER=1 (CI) turns a missing browser into a
+// failure instead of a skip.
+const hasBrowser = await browserAvailable();
+const requireBrowser = process.env.PLINTH_REQUIRE_BROWSER === "1";
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
-const opts = { skip: hasChrome ? false : "Chrome not installed" };
+const opts = { skip: hasBrowser || requireBrowser ? false : "no browser (install Chrome or set PLINTH_BROWSER)" };
 
 let server;
 let baseUrl;
@@ -50,10 +52,28 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function runPlinth(args) {
-  const res = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", cwd: dir });
+function runPlinth(args, env = process.env) {
+  const res = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", cwd: dir, env });
   return { code: res.status, out: res.stdout + res.stderr };
 }
+
+// Renders are memoized by name so tests sharing an output stay
+// independent: whichever test runs first renders it.
+const renders = new Map();
+function render(name, args) {
+  if (!renders.has(name)) {
+    const out = path.join(dir, `${name}.png`);
+    const res = runPlinth([...args, "--out", out]);
+    renders.set(name, { ...res, out, img: res.code === 0 ? decodePng(readFileSync(out)) : null });
+  }
+  return renders.get(name);
+}
+const phone = () => render("phone", [baseUrl, "--device", "iphone-16-pro"]);
+const browserShot = () => render("banner", [baseUrl, "--device", "browser"]);
+
+test("a browser is available when PLINTH_REQUIRE_BROWSER=1", { skip: requireBrowser ? false : "PLINTH_REQUIRE_BROWSER not set" }, () => {
+  assert.ok(hasBrowser, "no browser could be launched (install Chrome or set PLINTH_BROWSER)");
+});
 
 /** Absolute output px for a screen-relative pt coordinate. */
 function absPx(device, ptX, ptY) {
@@ -79,8 +99,7 @@ function regionHasColor(img, device, rect, color, tolerance = 20) {
 }
 
 test("standalone: DPR-exact safe-area capture, exact dims, all checks pass", opts, () => {
-  const out = path.join(dir, "phone.png");
-  const res = runPlinth([baseUrl, "--device", "iphone-16-pro", "--out", out]);
+  const res = phone();
   assert.equal(res.code, 0, res.out);
   // 402×778pt content viewport at @3x (874 − 62 top − 34 bottom) [devices.mjs]
   assert.match(res.out, /capture is DPR-exact \(safe-area viewport\) — ok \(1206×2334/);
@@ -91,14 +110,13 @@ test("standalone: DPR-exact safe-area capture, exact dims, all checks pass", opt
 
   const d = DEVICES["iphone-16-pro"];
   const size = frameSize(d);
-  const dims = pngSize(readFileSync(out));
+  const dims = pngSize(readFileSync(res.out));
   assert.equal(dims.width, Math.round((size.width + 2 * PAD) * d.dpr));
   assert.equal(dims.height, Math.round((size.height + 2 * PAD) * d.dpr));
 });
 
 test("fidelity: no page pixels under island, status bar, or home indicator", opts, () => {
-  const out = path.join(dir, "phone.png"); // from previous test
-  const img = decodePng(readFileSync(out));
+  const { img } = phone();
   const d = DEVICES["iphone-16-pro"];
   const cr = contentRect(d, "standalone");
 
@@ -198,9 +216,9 @@ test("--hide removes the cookie banner before capture", opts, () => {
   const cr = contentRect(d, "standalone");
   const bannerY = cr.height - 34; // fixed banner: 52px tall, 8px above bottom
 
-  const kept = runPlinth([baseUrl, "--device", "browser", "--out", path.join(dir, "banner.png")]);
+  const kept = browserShot();
   assert.equal(kept.code, 0, kept.out);
-  const imgKept = decodePng(readFileSync(path.join(dir, "banner.png")));
+  const imgKept = kept.img;
   assert.ok(colorDistance(pixelAt(imgKept, d, d.pt.width / 2, bannerY), [250, 204, 21, 255]) <= 8, "banner should be visible");
 
   const hidden = runPlinth([baseUrl, "--device", "browser", "--hide", "#cookie", "--out", path.join(dir, "nobanner.png")]);
@@ -210,11 +228,12 @@ test("--hide removes the cookie banner before capture", opts, () => {
 });
 
 test("browser frame has tab strip and toolbar above an exact-size viewport", opts, () => {
-  const out = path.join(dir, "banner.png"); // from previous test
+  const shot = browserShot();
+  assert.equal(shot.code, 0, shot.out);
   const d = DEVICES.browser;
-  const img = decodePng(readFileSync(out));
+  const img = shot.img;
   const size = frameSize(d);
-  const dims = pngSize(readFileSync(out));
+  const dims = { width: img.width, height: img.height };
   assert.equal(dims.width, (size.width + 2 * PAD) * d.dpr);
   assert.equal(dims.height, (size.height + 2 * PAD) * d.dpr);
   // Chrome rows above the content must not be page pixels.
@@ -282,7 +301,7 @@ test("unknown device is a usage error listing devices", () => {
 });
 
 test("png decoder round-trips Chromium output", opts, () => {
-  const out = path.join(dir, "phone.png");
+  const { out } = phone();
   const img = decodePng(readFileSync(out));
   assert.equal(img.width, pngSize(readFileSync(out)).width);
   assert.equal(getPixel(img, 0, 0).length, 4);
