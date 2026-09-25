@@ -99,6 +99,17 @@ function parseArgs(argv) {
 
 // ---------------------------------------------------------- thumbnails
 
+const escHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+function basePathOf(project) {
+  for (const name of NEXT_CONFIG_NAMES) {
+    const m = project && readText(path.join(project, name)).match(/\bbasePath\s*:\s*(["'`])([^"'`]*)\1/);
+    if (m) return m[2].replace(/\/$/, "");
+  }
+  return "";
+}
+
+/** Static routes through plinth; files are named by diagram node id (r<i>). */
 function renderThumbs(routes, opts) {
   const plinth = process.env.RAMBLE_PLINTH
     ?? fileURLToPath(new URL("../../plinth/scripts/plinth.mjs", import.meta.url));
@@ -107,36 +118,34 @@ function renderThumbs(routes, opts) {
       "--thumbs needs the plinth skill next to ramble (skills/plinth); set RAMBLE_PLINTH to its scripts/plinth.mjs",
     );
   }
-  const targets = routes.filter((r) => !r.dynamic).slice(0, opts.thumbCap);
+  const targets = routes.map((r, i) => ({ r, id: `r${i}` })).filter(({ r }) => !r.dynamic).slice(0, opts.thumbCap);
   const thumbsDir = path.join(opts.out, "thumbs");
   mkdirSync(thumbsDir, { recursive: true });
   const rows = [];
-  for (const r of targets) {
-    const slug = r.urlPath === "/" ? "home" : r.urlPath.slice(1).replace(/[^a-zA-Z0-9]+/g, "-");
-    const png = path.join(thumbsDir, `${slug}.png`);
-    const url = `${opts.baseUrl.replace(/\/$/, "")}${r.urlPath}`;
+  for (const { r, id } of targets) {
+    const slug = r.urlPath.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "") || "home";
+    const file = `${id}-${slug}.png`;
+    const png = path.join(thumbsDir, file);
+    const url = `${opts.baseUrl.replace(/\/$/, "")}${basePathOf(r.project)}${r.urlPath}`;
     const res = spawnSync(process.execPath, [
       plinth, url, "--device", "browser", "--padding", "16", "--no-shadow", "--bg", "none", "--out", png,
     ], { encoding: "utf8", timeout: 120000 });
     const ok = res.status === 0 && existsSync(png);
-    if (ok) {
-      // Halve for gallery weight; keep going without ffmpeg.
-      spawnSync("ffmpeg", ["-y", "-loglevel", "error", "-i", png, "-vf", "scale=560:-1:flags=lanczos", png + ".small.png"], {});
-      rows.push({ route: r.urlPath, img: existsSync(png + ".small.png") ? `thumbs/${slug}.png.small.png` : `thumbs/${slug}.png` });
-    } else {
-      rows.push({ route: r.urlPath, error: (res.stdout + res.stderr).split("\n").find((l) => l.includes("plinth:")) ?? "capture failed" });
-    }
+    const error = res.error?.message
+      ?? `${res.stdout ?? ""}${res.stderr ?? ""}`.split("\n").find((l) => l.includes("plinth:"))
+      ?? `capture failed (exit ${res.status})`;
+    rows.push(ok ? { route: r.urlPath, img: `thumbs/${file}` } : { route: r.urlPath, error });
     console.log(`  thumb ${r.urlPath} — ${ok ? "ok" : "FAILED"}`);
   }
   const cells = rows.map((row) =>
     row.img
-      ? `<td align="center"><img src="${row.img}" width="280"/><br/><code>${row.route}</code></td>`
-      : `<td align="center">⚠️ <code>${row.route}</code><br/>${row.error}</td>`);
+      ? `<td align="center"><img src="${escHtml(row.img)}" width="280"/><br/><code>${escHtml(row.route)}</code></td>`
+      : `<td align="center">⚠️ <code>${escHtml(row.route)}</code><br/>${escHtml(row.error)}</td>`);
   const tableRows = [];
   for (let i = 0; i < cells.length; i += 3) tableRows.push(`<tr>${cells.slice(i, i + 3).join("")}</tr>`);
   writeFileSync(
     path.join(opts.out, "flow-visual.md"),
-    `# Visual screen map\n\nStatic routes captured from ${opts.baseUrl} (cap ${opts.thumbCap}; dynamic routes need real params — see flow.md).\n\n<table>\n${tableRows.join("\n")}\n</table>\n`,
+    `# Visual screen map\n\nStatic routes captured from ${escHtml(opts.baseUrl)} (cap ${opts.thumbCap}; dynamic routes need real params — see flow.md).\n\n<table>\n${tableRows.join("\n")}\n</table>\n`,
   );
   return rows;
 }

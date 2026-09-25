@@ -1,6 +1,6 @@
 /**
  * FIXTURE mock server for the grok-chat fixture app. Serves hand-written
- * static HTML per route so map --thumbs has real screens to capture.
+ * static HTML per route so ramble --thumbs has real screens to capture.
  * Not xAI code; every page is watermarked "fixture".
  *
  *   node serve.mjs [port]     (default 4700)
@@ -39,7 +39,7 @@ const shell = (title, body) => `<!doctype html><html><head><meta charset="utf-8"
   <a class="pill" href="/login">Sign in</a><a class="pill solid" href="/login">Sign up</a></nav>
 </header>
 <main>${body}</main>
-<footer>fixture app — not xai — mock screens for the map skill demo</footer>
+<footer>fixture app — not xai — mock screens for the ramble skill demo</footer>
 </body></html>`;
 
 const card = (title, sub) => `<div class="card"><b>${title}</b>${sub}</div>`;

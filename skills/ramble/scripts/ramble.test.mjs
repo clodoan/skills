@@ -1,7 +1,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -648,4 +648,56 @@ test("numeric flags reject non-integers", () => {
     assert.equal(code, 2, out);
     assert.match(out, /needs a positive integer/);
   }
+});
+
+function plinthStub(dir) {
+  const stub = path.join(dir, "plinth-stub.mjs");
+  writeFileSync(stub, `import { appendFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(path.join(dir, "calls.jsonl"))}, JSON.stringify(args) + "\\n");
+if (args[0].includes("fail")) { console.error("plinth: capture failed <net::ERR_FAILED>"); process.exit(3); }
+writeFileSync(args[args.indexOf("--out") + 1], "png");
+`);
+  return stub;
+}
+
+test("--thumbs: one plinth call per static route, files named by node id, HTML escaped", () => {
+  const root = makeApp("thumbs", {
+    "package.json": NEXT_PKG,
+    "next.config.js": `module.exports = { basePath: "/docs" };`,
+    "app/page.tsx": "x",
+    "app/a/b/page.tsx": "x",
+    "app/a-b/page.tsx": "x",
+    "app/x<y>/page.tsx": "x",
+    "app/fail/page.tsx": "x",
+    "app/post/[id]/page.tsx": "x",
+  });
+  const out = path.join(root, "ramble-out");
+  const res = spawnSync(process.execPath, [CLI, root, "--out", out, "--thumbs", "--base-url", "http://h:1/;$(touch PWNED)/"], {
+    encoding: "utf8", cwd: root, env: { ...process.env, RAMBLE_PLINTH: plinthStub(root) },
+  });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  const calls = readFileSync(path.join(root, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(calls.map((c) => [c[0], path.basename(c.at(-1))]), [
+    ["http://h:1/;$(touch PWNED)/docs/", "r0-home.png"],
+    ["http://h:1/;$(touch PWNED)/docs/a-b", "r1-a-b.png"],
+    ["http://h:1/;$(touch PWNED)/docs/a/b", "r2-a-b.png"],
+    ["http://h:1/;$(touch PWNED)/docs/fail", "r3-fail.png"],
+    ["http://h:1/;$(touch PWNED)/docs/x<y>", "r5-x-y.png"],
+  ]);
+  assert.ok(!existsSync(path.join(root, "PWNED")));
+  const gallery = readFileSync(path.join(out, "flow-visual.md"), "utf8");
+  assert.ok(gallery.includes("<code>/x&lt;y&gt;</code>"));
+  assert.ok(gallery.includes("plinth: capture failed &lt;net::ERR_FAILED&gt;"));
+  assert.ok(gallery.includes('<img src="thumbs/r2-a-b.png"'));
+  assert.ok(!gallery.includes(".small.png"));
+});
+
+test("--thumbs without plinth installed is a usage error naming RAMBLE_PLINTH", () => {
+  const root = makeApp("noplinth", { "package.json": "{}", "app/page.tsx": "x" });
+  const res = spawnSync(process.execPath, [CLI, root, "--out", path.join(root, "o"), "--thumbs", "--base-url", "http://h"], {
+    encoding: "utf8", env: { ...process.env, RAMBLE_PLINTH: path.join(root, "missing.mjs") },
+  });
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /RAMBLE_PLINTH/);
 });
