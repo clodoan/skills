@@ -10,14 +10,14 @@ Plinth captures with Playwright at the device's **safe-area viewport**
 indicator), draws faithful chrome, and composites at native DPR. Frames
 and chrome are generated CSS/SVG — no copyrighted vendor artwork.
 
-![grok.com (logged out) on phone, tablet and laptop frames, dark](assets/grok-com-multi-device-dark.png)
+![x.ai (public homepage) on phone, tablet and laptop frames](assets/xai-multi-device.png)
 
 ## Quick start
 
 ```bash
 cd skills/plinth && npm install     # playwright-core + @fontsource/inter
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --dark
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode safari --dark
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode safari
 ```
 
 Requires Node ≥ 18 and an installed Chrome/Chromium (playwright-core
@@ -25,9 +25,9 @@ drives it via the `chrome` channel — no browser download; set
 `PLINTH_BROWSER=/path/to/chrome` to override). ffmpeg only for `--scroll`.
 
 <p>
-  <img alt="grok.com as iPhone 16 Pro, standalone mode: status bar, island, home indicator, content inside the safe area" src="assets/grok-com-iphone-16-pro-dark.png" width="300" />
+  <img alt="x.ai as iPhone 16 Pro, app mode: status bar, island, home indicator, content inside the safe area" src="assets/xai-iphone-16-pro-app.png" width="300" />
   &nbsp;
-  <img alt="grok.com as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/grok-com-iphone-16-pro-safari-dark.png" width="300" />
+  <img alt="x.ai as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/xai-iphone-16-pro-safari.png" width="300" />
 </p>
 
 All showcase shots are public, logged-out pages (captures run in a
@@ -127,8 +127,7 @@ environment, so the overlay validates against the cited numeric spec):
 
 | Site | Run | Result / findings |
 | --- | --- | --- |
-| [grok.com](https://grok.com) (logged out) | standalone + safari modes dark, multi-device dark row, browser light | All fidelity checks pass; showcase images above come from these runs. Spec overlay confirms region registration. |
-| x.ai / docs.x.ai / console.x.ai | `browser` | **Finding:** blocked for this test machine's egress (Cloudflare block page rendered; checks passed because the block page really rendered). Re-run from a normal network. |
+| [x.ai](https://x.ai) and public pages (/grok, /api, /news, /company) | app + safari modes, multi-device row, browser frame | All fidelity checks pass; showcase images above come from these runs. Spec overlay confirms region registration. **Finding:** Cloudflare blocks the default HeadlessChrome user agent outright (the block page rendered and dimension checks passed, because a page really did render) — plinth now presents the equivalent stable-Chrome UA, which passes. Always eyeball output on bot-walled sites. |
 | vercel.com, app-router.vercel.app, commerce-shopify.vercel.app, github.com | earlier runs | See git history: cookie banner via `--hide`, empty API-backed states, blocked-CDN blank pages — all documented app-state findings, not frame issues. |
 
 Known limitations: multi-device rows composite at @2x (mixed native

@@ -47,12 +47,19 @@ export async function withBrowser(fn) {
  * Capture one screenshot. Returns { buffer, pxWidth, pxHeight }.
  * options: { viewport, dpr, dark, hide[], waitMs, fullPage, media }
  */
+// Headless Chrome advertises "HeadlessChrome" in its UA, which bot walls
+// (e.g. Cloudflare on x.ai) block outright. Present the equivalent
+// stable-Chrome UA instead — same engine, honest version.
+const CHROME_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
 export async function capture(browser, url, opts) {
   const context = await browser.newContext({
     viewport: opts.viewport,
     deviceScaleFactor: opts.dpr,
     colorScheme: opts.dark ? "dark" : "light",
     reducedMotion: "reduce",
+    userAgent: CHROME_UA,
   });
   const page = await context.newPage();
   try {
