@@ -78,6 +78,35 @@ const FIXTURES = {
     "-vf", "trim=end_frame=1,loop=loop=-1:size=1,trim=end_frame=120,setpts=N/60/TB",
     "-c:v", "libx264", "-crf", "30", "-g", "30", "-pix_fmt", "yuv420p", out,
   ]),
+  // Retina-sized frame with a wide 40px band sliding across it.
+  "wide.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=2880x1800:d=0.5:r=30",
+    "-f", "lavfi", "-i", "color=c=white:s=1600x40:d=0.5:r=30",
+    "-filter_complex", "[0][1]overlay=x='100+40*n':y=900",
+    "-pix_fmt", "yuv420p", "-preset", "ultrafast", out,
+  ]),
+  // 640×360 stored, displayed rotated 90° (360×640); the box moves along
+  // stored y=20, which is a vertical band near the display's left edge.
+  "rotated.mp4": (out) => {
+    const src = file("rotated-src.mp4");
+    ffmpeg([
+      "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:d=1:r=30",
+      "-f", "lavfi", "-i", "color=c=white:s=30x30:d=1:r=30",
+      "-filter_complex", "[0][1]overlay=x='20+8*n':y=20", "-pix_fmt", "yuv420p", src,
+    ]);
+    // -display_rotation exists from ffmpeg 6.1; older builds honor the rotate tag.
+    try {
+      ffmpeg(["-display_rotation", "90", "-i", src, "-c", "copy", out]);
+    } catch {
+      ffmpeg(["-i", src, "-c", "copy", "-metadata:s:v:0", "rotate=90", out]);
+    }
+  },
+  "hfr.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=320x240:d=0.5:r=240",
+    "-f", "lavfi", "-i", "color=c=white:s=30x30:d=0.5:r=240",
+    "-filter_complex", "[0][1]overlay=x='10+n':y=100", "-pix_fmt", "yuv420p", out,
+  ]),
+  "one-frame.mp4": (out) => ffmpeg(["-i", fixture("linear.mp4"), "-frames:v", "1", out]),
 };
 
 function fixture(name) {
@@ -211,7 +240,7 @@ test("crops to the motion band and upscales small crops", opts, () => {
   // stay a horizontal band, not the full frame.
   assert.ok(y >= 60 && y <= 80, `crop y ${y}`);
   assert.ok(h <= 120, `crop h ${h} should be a band, not the full 240`);
-  assert.match(index, /upscaled \dx/);
+  assert.match(index, /shown at \dx on sheets/);
 });
 
 test("writes stamped contact sheets, diff sheets, chart, and index sections", opts, () => {
@@ -389,4 +418,61 @@ test("--min-px and --threshold tune detection", opts, () => {
   const { code, out } = runScrub([fixture("still.mp4"), "--threshold", "30"]);
   assert.equal(code, 2);
   assert.match(out, /--threshold must be at most 24/);
+});
+
+test("sheets stay under 4096px on both axes", opts, () => {
+  const outDir = scrubbed("wide.mp4");
+  const pngs = ["overview.png", ...readdirSync(path.join(outDir, "sheets")).map((f) => `sheets/${f}`)];
+  for (const png of pngs) {
+    const [w, h] = pngSize(path.join(outDir, png));
+    assert.ok(w <= 4096 && h <= 4096, `${png} is ${w}×${h}`);
+  }
+  assert.match(readIndex(outDir), /shown at 0\.\d\dx on sheets/);
+});
+
+test("rotated video uses display dimensions", opts, () => {
+  const outDir = scrubbed("rotated.mp4");
+  const index = readIndex(outDir);
+  assert.match(index, /Resolution:\*\* 360×640 px/);
+  const [, x, y, w, h] = index.match(/Motion crop:\*\* x=(\d+) y=(\d+) (\d+)×(\d+)px/).map(Number);
+  assert.ok(x + w <= 360 && y + h <= 640 && h > w, `crop ${x},${y} ${w}×${h}`);
+  // Cell 8 (box at display y≈518–548) shows the box, not an empty crop.
+  const sheet = path.join(outDir, "sheets/sheet-01.png");
+  const [cx, cy, cw, ch] = cellRect(sheet, 8);
+  assert.ok(grayRegion(sheet, [cx, cy, cw, Math.floor(ch * 0.8)]).some((v) => v > 200), "box visible in cell 8");
+});
+
+test("retina hint hedges both ways", opts, () => {
+  assert.match(readIndex(scrubbed("wide.mp4")), /large enough to be a 2x \(Retina\) capture, or a 1x large monitor/);
+  assert.match(readIndex(scrubbed("knob.mp4")), /could be a 1x capture or a 2x region capture/);
+});
+
+test("high frame rates normalize up to 120 fps and say when they drop frames", opts, () => {
+  const index = readIndex(scrubbed("hfr.mp4"));
+  assert.match(index, /constant 120 fps/);
+  assert.match(index, /faster than 120 fps\*\*, so normalizing dropped frames/);
+});
+
+test("index reports the median frame rate used for VFR", opts, () => {
+  assert.match(readIndex(scrubbed("vfr.mkv")), /median frame interval \d+\.\d\d fps/);
+});
+
+test("numeric flags round before validating; --pad accepts 0", opts, () => {
+  const { code, out } = runScrub([fixture("linear.mp4"), "--fps", "0.4"]);
+  assert.equal(code, 2);
+  assert.match(out, /--fps needs a whole number ≥ 1/);
+  assert.match(readIndex(scrubbed("linear.mp4", ["--pad", "0"])), /Motion crop:\*\* x=20 y=160 220×40px/);
+});
+
+test("a one-frame clip fails with a plain error", opts, () => {
+  const { code, out } = runScrub([fixture("one-frame.mp4"), "--out", file("one-scrub")]);
+  assert.equal(code, 2);
+  assert.match(out, /fewer than 2 frames after normalization; nothing to compare/);
+  assert.doesNotMatch(out, /Usage:/);
+});
+
+test("no-motion index does not list sheets that were not written", opts, () => {
+  const index = readIndex(scrubbed("still.mp4"));
+  assert.doesNotMatch(index, /sheets\/sheet-\*\.png/);
+  assert.doesNotMatch(index, /sheets\/diff-\*\.png/);
 });

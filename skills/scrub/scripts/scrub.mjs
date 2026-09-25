@@ -32,6 +32,8 @@ const TRIM_PAD_FRAMES = 3;
 const CROP_MAX_COVERAGE = 0.85; // skip cropping when motion covers most of the frame
 const UPSCALE_TARGET = 320; // upscale crops until min dimension reaches this
 const MAX_UPSCALE = 4;
+const SHEET_MAX_PX = 4096; // sheets stay under image-reader limits (8000px) on both axes
+const MAX_FPS = 120;
 // Everything scrub writes; only these are removed when reusing an output dir.
 const NORMALIZED = path.join("work", "normalized.mp4");
 const SCRUB_OUTPUTS = ["index.md", "overview.png", "motion.csv", "motion-curve.svg", "sheets", "work"];
@@ -54,7 +56,7 @@ Options:
   --fps <n>           Override the normalized frame rate
   --grid <n>          Contact sheet grid (default 4 = 4x4 cells)
   --max-frames <n>    Cap on frames in dense sheets (default 96)
-  --pad <px>          Padding around the motion crop (default 24)
+  --pad <px>          Padding around the motion crop (default 24, 0 allowed)
   --no-crop           Analyze the full frame, skip motion cropping
   --min-px <n>        Changed pixels a frame needs to count as motion (default 20)
   --threshold <n>     Luma delta for faint change such as fades (default 8, max 24)
@@ -74,17 +76,17 @@ function parseArgs(argv) {
       if (v === undefined) throw new UsageError(`missing value for ${arg}`);
       return v;
     };
-    const nextInt = () => {
-      const n = Number(next());
-      if (!Number.isFinite(n) || n <= 0) throw new UsageError(`${arg} needs a positive number`);
-      return Math.round(n);
+    const nextInt = (min = 1) => {
+      const n = Math.round(Number(next()));
+      if (!Number.isFinite(n) || n < min) throw new UsageError(`${arg} needs a whole number ≥ ${min}`);
+      return n;
     };
     switch (arg) {
       case "--out": opts.out = next(); break;
       case "--fps": opts.fps = nextInt(); break;
       case "--grid": opts.grid = nextInt(); break;
       case "--max-frames": opts.maxFrames = nextInt(); break;
-      case "--pad": opts.pad = nextInt(); break;
+      case "--pad": opts.pad = nextInt(0); break;
       case "--min-px": opts.minPx = nextInt(); break;
       case "--threshold":
         opts.threshold = nextInt();
@@ -209,9 +211,9 @@ function probe(input) {
 }
 
 function pickFps(meta, override) {
-  if (override) return override;
-  const candidate = meta.vfr && meta.medianFps > 0 ? meta.medianFps : meta.avgFps || meta.medianFps || 30;
-  return Math.min(60, Math.max(5, Math.round(candidate)));
+  if (override) return { fps: override, capped: false };
+  const candidate = Math.round(meta.vfr && meta.medianFps > 0 ? meta.medianFps : meta.avgFps || meta.medianFps || 30);
+  return { fps: Math.min(MAX_FPS, Math.max(5, candidate)), capped: candidate > MAX_FPS };
 }
 
 function normalize(input, fps, outDir) {
@@ -222,11 +224,13 @@ function normalize(input, fps, outDir) {
     "-an", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
     NORMALIZED,
   ], outDir);
-  const count = run("ffprobe", [
+  // Dimensions come from the normalized clip: ffmpeg applies rotation
+  // metadata and trims odd sizes, so the source's stream size can differ.
+  const stream = JSON.parse(run("ffprobe", [
     "-v", "error", "-select_streams", "v:0", "-count_packets",
-    "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", out,
-  ]).trim();
-  return Number(count);
+    "-show_entries", "stream=nb_read_packets,width,height", "-of", "json", out,
+  ])).streams[0];
+  return { frames: Number(stream.nb_read_packets), width: stream.width, height: stream.height };
 }
 
 // One decode pass, two thresholds: per-transition motion bbox + changed-
@@ -317,17 +321,35 @@ function analyzeMotion(rows, meta, totalFrames, fps, minPx) {
   return { table, active, start, end, union, trimmed: start > 0 || end < totalFrames - 1 };
 }
 
-function computeCrop(union, pad, meta) {
+function computeCrop(union, pad, meta, grid) {
   if (!union) return null;
   const even = (n) => Math.max(0, 2 * Math.floor(n / 2));
-  let x = even(union.x1 - pad);
-  let y = even(union.y1 - pad);
-  let w = Math.min(meta.width - x, 2 * Math.ceil((union.x2 - union.x1 + 2 * pad) / 2));
-  let h = Math.min(meta.height - y, 2 * Math.ceil((union.y2 - union.y1 + 2 * pad) / 2));
+  const x = even(union.x1 - pad);
+  const y = even(union.y1 - pad);
+  // bbox x2/y2 are inclusive.
+  const w = Math.min(meta.width - x, 2 * Math.ceil((union.x2 + 1 + pad - x) / 2));
+  const h = Math.min(meta.height - y, 2 * Math.ceil((union.y2 + 1 + pad - y) / 2));
   if ((w * h) / (meta.width * meta.height) > CROP_MAX_COVERAGE) return null;
+  return { x, y, w, h, scale: cellScale(w, h, grid, true) };
+}
+
+// Scale for one sheet cell: small crops upscale (nearest neighbor) toward
+// UPSCALE_TARGET, and every grid×grid sheet stays within SHEET_MAX_PX.
+function cellScale(w, h, grid, upscale) {
+  const maxCell = Math.floor((SHEET_MAX_PX - 4 - 2 * (grid - 1)) / grid);
+  const big = Math.max(w, h);
+  if (big > maxCell) return maxCell / big;
   let scale = 1;
-  while (Math.min(w, h) * scale < UPSCALE_TARGET && scale < MAX_UPSCALE) scale++;
-  return { x, y, w, h, scale };
+  while (upscale && Math.min(w, h) * scale < UPSCALE_TARGET && scale < MAX_UPSCALE && big * (scale + 1) <= maxCell) scale++;
+  return scale;
+}
+
+// Filter prefix and output cell size for a w×h region shown at scale.
+function scaleCell(w, h, scale) {
+  if (scale === 1) return { chain: "", cellW: w };
+  if (scale > 1) return { chain: `scale=iw*${scale}:ih*${scale}:flags=neighbor,`, cellW: w * scale };
+  const cw = 2 * Math.floor((w * scale) / 2), ch = 2 * Math.floor((h * scale) / 2);
+  return { chain: `scale=${cw}:${ch}:flags=area,`, cellW: cw };
 }
 
 // Pick which normalized frames appear on dense sheets: every frame when
@@ -372,12 +394,11 @@ function renderGraph(outDir, graph, output) {
 function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFrames, stamps, fps }) {
   const { start, end } = motion;
   const stamp = (frameExpr, cellW) => (stamps ? stampFilter(frameExpr, stampFontsize(cellW), fps) : "null");
-  const cellW = crop ? crop.w * crop.scale : meta.width;
   const tile = `tile=${grid}x${grid}:padding=2:margin=2:color=0x101010`;
-  const cropChain = crop
-    ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` +
-      (crop.scale > 1 ? `scale=iw*${crop.scale}:ih*${crop.scale}:flags=neighbor,` : "")
-    : "";
+  const full = scaleCell(meta.width, meta.height, cellScale(meta.width, meta.height, grid, false));
+  const cell = crop ? scaleCell(crop.w, crop.h, crop.scale) : full;
+  const cellW = cell.cellW;
+  const cropChain = (crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : "") + cell.chain;
 
   mkdirSync(path.join(outDir, "sheets"), { recursive: true });
 
@@ -388,7 +409,7 @@ function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFram
       Math.round((i * (totalFrames - 1)) / Math.max(1, overviewCount - 1))),
   )];
   renderGraph(outDir,
-    `${stamp("n", meta.width)},${selectExpr(overviewFrames)},${tile}`,
+    `${full.chain}${stamp("n", full.cellW)},${selectExpr(overviewFrames)},${tile}`,
     "overview.png");
 
   const sheets = { overview: overviewFrames, dense: denseFrames };
@@ -507,11 +528,12 @@ function peakChange(active) {
 }
 
 function writeIndex(ctx) {
-  const { outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps } = ctx;
+  const { outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps } = ctx;
   const ms = (f) => Math.round((f * 1000) / fps);
   const retinaHint = Math.min(meta.width, meta.height) >= 1400
-    ? "resolution suggests a 2x (Retina) capture — divide px by 2 for pt/logical units"
-    : "resolution suggests a 1x capture (heuristic — verify against known element sizes)";
+    ? "large enough to be a 2x (Retina) capture, or a 1x large monitor; confirm against a known element size before halving px to pt"
+    : "could be a 1x capture or a 2x region capture; confirm against a known element size before converting px to pt";
+  const fmtScale = (x) => (Number.isInteger(x) ? `${x}` : x.toFixed(2));
 
   const noMotion = motion.active.length === 0;
   const md = `# scrub · ${path.basename(opts.input)}
@@ -523,22 +545,22 @@ All frame numbers and milliseconds refer to the normalized clip
 ## Metadata
 
 - **Duration:** ${meta.duration.toFixed(3)}s (${totalFrames} frames at ${fps} fps normalized)
-- **Source frame rate:** avg ${meta.avgFps.toFixed(2)} fps, container reports ${meta.reportedFps.toFixed(2)} fps${meta.vfr ? " — **variable frame rate detected**, normalized to a constant rate before analysis" : " (constant)"}
+- **Source frame rate:** median frame interval ${meta.medianFps.toFixed(2)} fps, avg ${meta.avgFps.toFixed(2)} fps, container reports ${meta.reportedFps.toFixed(2)} fps${meta.vfr ? " — **variable frame rate detected**, normalized to a constant rate before analysis" : " (constant)"}${fpsCapped ? ` — **faster than ${MAX_FPS} fps**, so normalizing dropped frames (pass --fps to keep them)` : ""}
 - **Resolution:** ${meta.width}×${meta.height} px — ${retinaHint}
 
 ## Motion summary
 
 ${noMotion ? "**No motion detected** above the noise floor. The clip appears static; only the overview sheet was generated." : `- **Active window:** frames ${motion.start}–${motion.end} (${ms(motion.start)}–${ms(motion.end)} ms)${motion.trimmed ? " — still head/tail trimmed automatically" : " — motion spans the whole clip"}
-- **Motion crop:** ${crop ? `x=${crop.x} y=${crop.y} ${crop.w}×${crop.h}px${crop.scale > 1 ? `, upscaled ${crop.scale}x for legibility (divide sheet px by ${crop.scale})` : ""}` : "none (motion covers most of the frame or --no-crop)"}
+- **Motion crop:** ${crop ? `x=${crop.x} y=${crop.y} ${crop.w}×${crop.h}px${crop.scale !== 1 ? `, shown at ${fmtScale(crop.scale)}x on sheets (divide sheet px by ${fmtScale(crop.scale)})` : ""}` : "none (motion covers most of the frame or --no-crop)"}
 - **Peak change:** ${peakChange(motion.active)}
 - **Dense sampling:** ${dense.strategy}, ${dense.frames.length} frames across ${sheetsCount} sheet(s)`}
 
 ## Files
 
 - \`overview.png\` — ${Math.min(opts.grid * opts.grid, totalFrames)} frames sampled evenly across the whole clip, uncropped
-- \`sheets/sheet-*.png\` — dense ${opts.grid}×${opts.grid} contact sheets of the active window (cropped to motion), each cell stamped \`f<frame> <ms>ms\`
-- \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×), cell for cell with the sheets; bright pixels = what moved INTO the stamped frame
-- \`motion.csv\` — per-frame motion bounding box and changed-pixel count
+${noMotion ? "" : `- \`sheets/sheet-*.png\` — dense ${opts.grid}×${opts.grid} contact sheets of the active window${crop ? " (cropped to motion)" : ""}${stamps ? ", each cell stamped \`f<frame> <ms>ms\`" : ""}
+- \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×), cell for cell with the sheets; bright pixels = what moved INTO that frame
+`}- \`motion.csv\` — per-frame motion bounding box and changed-pixel count
 ${hasChart ? "- `motion-curve.svg` — plotted x/y center and changed-pixel curves\n" : ""}- \`work/normalized.mp4\` — the constant-rate clip all frame numbers refer to (use it for any further ffmpeg extraction)
 ${stamps ? "" : `\n**Cells are unstamped** (this ffmpeg cannot draw text). Frames per sheet, row by row:\n\n${sheetFrameList(sheets, opts.grid, ms)}\n`}
 ## Per-frame motion table
@@ -575,11 +597,12 @@ function main() {
   const input = path.resolve(opts.input);
   console.log(`scrub · probing ${opts.input}`);
   const meta = probe(input);
-  const fps = pickFps(meta, opts.fps);
+  const { fps, capped: fpsCapped } = pickFps(meta, opts.fps);
   if (meta.vfr) console.log(`  variable frame rate detected — normalizing to ${fps} fps`);
 
-  const totalFrames = normalize(input, fps, outDir);
-  if (totalFrames < 2) throw new UsageError("clip has fewer than 2 frames after normalization");
+  const { frames: totalFrames, width, height } = normalize(input, fps, outDir);
+  if (totalFrames < 2) throw new Error("clip has fewer than 2 frames after normalization; nothing to compare");
+  Object.assign(meta, { width, height });
   const stamps = canDrawText(outDir);
   if (!stamps) {
     console.error("scrub: warning: this ffmpeg cannot draw text (no drawtext filter or no usable font), " +
@@ -590,7 +613,7 @@ function main() {
   console.log(`  analyzing ${totalFrames} frames at ${fps} fps`);
   const rows = motionPass(outDir, opts.threshold);
   const motion = analyzeMotion(rows, meta, totalFrames, fps, opts.minPx);
-  const crop = opts.crop && motion.active.length > 0 ? computeCrop(motion.union, opts.pad, meta) : null;
+  const crop = opts.crop && motion.active.length > 0 ? computeCrop(motion.union, opts.pad, meta, opts.grid) : null;
   const dense = motion.active.length > 0
     ? pickDenseFrames(motion.start, motion.end, opts.maxFrames)
     : { frames: [], strategy: "none (no motion)" };
@@ -601,7 +624,7 @@ function main() {
   writeCsv(outDir, motion.table);
   const hasChart = writeChart(outDir, motion.table, motion);
   const sheetsCount = Math.ceil(dense.frames.length / (opts.grid * opts.grid));
-  writeIndex({ outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps });
+  writeIndex({ outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps });
 
   if (!opts.keepWork) {
     for (const f of workFiles) rmSync(f, { force: true });

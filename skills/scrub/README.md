@@ -41,18 +41,22 @@ recording-scrub/
 
 - **Variable frame rate** — CleanShot and QuickTime recordings are often
   VFR; scrub detects it from packet timestamps and normalizes to a
-  constant rate before any frame math, so `frame × (1000/fps)` is always
-  honest. The index states when this happened.
+  constant rate (at most 120 fps) before any frame math, so
+  `frame × (1000/fps)` is always honest. The index states when this
+  happened, and when a faster source lost frames.
 - **Still head/tail** — trimmed automatically; only the window where
   something moves gets dense treatment.
 - **Motion crop** — sheets are cropped to the bounding box of all motion
   (padded), and small crops are upscaled up to 4× (nearest-neighbor, so
-  pixels stay inspectable).
+  pixels stay inspectable). Every sheet stays within 4096 px per side;
+  large frames are scaled down to fit. Rotated videos use their display
+  orientation.
 - **Long clips** — dense frames are capped (default 96): windows that
   fit get every frame, longer ones evenly spaced frames from start to
   end. The overview always spans the full clip.
-- **Retina hint** — high-resolution captures are flagged as likely 2x so
-  px can be halved into pt. It's a heuristic; verify against a known
+- **Retina hint** — the index says whether the resolution could be a 2x
+  capture. Resolution alone can't tell a 1x large monitor from Retina,
+  or a 1x capture from a 2x region capture, so verify against a known
   element size.
 
 ## Honesty about the numbers
@@ -85,7 +89,7 @@ skill (MIT).
 --fps <n>          override the normalized frame rate
 --grid <n>         sheet grid (default 4 = 16 cells per sheet)
 --max-frames <n>   cap on dense frames (default 96)
---pad <px>         padding around the motion crop (default 24)
+--pad <px>         padding around the motion crop (default 24, 0 allowed)
 --no-crop          keep the full frame
 --min-px <n>       changed pixels a frame needs to count as motion (default 20)
 --threshold <n>    luma delta for faint change such as fades (default 8, max 24)
