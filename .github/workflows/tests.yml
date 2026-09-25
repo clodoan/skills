@@ -12,8 +12,10 @@ jobs:
   chip-cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: node --test skills/chip/scripts/chip-check.test.mjs
@@ -21,8 +23,10 @@ jobs:
   scrub-cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
@@ -31,8 +35,10 @@ jobs:
   ramble-cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: node --test skills/ramble/scripts/ramble.test.mjs
@@ -41,8 +47,10 @@ jobs:
   plinth-cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
@@ -50,3 +58,6 @@ jobs:
         working-directory: skills/plinth
       - run: npm test
         working-directory: skills/plinth
+        env:
+          # fail instead of skipping if the runner image ever loses Chrome
+          PLINTH_REQUIRE_BROWSER: "1"
