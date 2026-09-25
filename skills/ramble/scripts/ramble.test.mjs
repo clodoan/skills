@@ -1,7 +1,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,19 @@ function runRamble(root, args = []) {
     try { return readFileSync(path.join(out, f), "utf8"); } catch { return ""; }
   };
   return { code: res.status, out: res.stdout + res.stderr, mmd: read("flow.mmd"), md: read("flow.md") };
+}
+
+/** Node labels and edges ("from -kind-> to", by label) of a flow.mmd. */
+function graph(mmd) {
+  const labels = new Map();
+  for (const m of mmd.matchAll(/^\s*(\w+)(?:\["(.*)"\]|\{\{"(.*)"\}\})\s*$/gm)) labels.set(m[1], m[2] ?? m[3]);
+  const edges = [];
+  const re = /^\s*(\w+) (?:-->|-\. (\w+) \.->|-\.->\|"([^"]*)"\|)\s*(\w+)\s*$/gm;
+  for (const m of mmd.matchAll(re)) {
+    const kind = m[2] ?? (m[3] !== undefined ? m[3] : "link");
+    edges.push(`${labels.get(m[1])} -${kind}-> ${labels.get(m[4])}`);
+  }
+  return { labels: [...labels.values()], edges };
 }
 
 test("next app router: groups, dynamic, catch-alls, slots, intercepts, privates", () => {
@@ -64,12 +77,12 @@ test("next app router: groups, dynamic, catch-alls, slots, intercepts, privates"
   assert.match(md, /\(\.\)photo under \/feed/);
   assert.match(md, /API route handlers[^\n]*:\*\* 1/);
 
-  // Edges: link / → /dashboard; template literal → /posts/:id; redirect dashed; middleware dashed.
-  assert.match(mmd, /r\d+ --> r\d+/);
-  assert.match(mmd, /-\. redirect \.->/);
-  assert.match(mmd, /middleware\{\{"middleware"\}\}/);
-  assert.match(mmd, /-\. middleware \.->/);
-  assert.match(md, /Self-check: every route file appears/);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "/ -link-> /dashboard",
+    "/dashboard -link-> /posts/:id",
+    "/login -redirect-> /dashboard",
+    "middleware -middleware-> /login",
+  ]);
 });
 
 test("edge targets resolve template literals against dynamic routes", () => {
@@ -80,12 +93,12 @@ test("edge targets resolve template literals against dynamic routes", () => {
   });
   const { code, mmd } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(mmd, /r\d+ --> r\d+/);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /items/:itemId"]);
 });
 
 test("next pages router: index, nested, dynamic; _app and api excluded", () => {
   const root = makeApp("nextpages", {
-    "package.json": "{}",
+    "package.json": `{"dependencies":{"next":"15"}}`,
     "pages/index.tsx": "export default () => null",
     "pages/about.tsx": "export default () => null",
     "pages/blog/[slug].tsx": "export default () => null",
@@ -196,22 +209,21 @@ test("expression-valued navigations are reported, not dropped", () => {
   });
   const { code, md } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(md, /Unresolved navigations[^:]*:\*\* 2 \(2 expression-valued\)/);
-  assert.match(md, /\{paths\.app\.getHref\(\)\}/);
-  assert.match(md, /\{dynamicUrl\}/);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 2 \(0 unmatched, 2 expression, 0 relative\)/);
+  assert.match(md, /`paths\.app\.getHref\(\)` at app\/page\.tsx:1 \(expression\)/);
+  assert.match(md, /`dynamicUrl` at app\/page\.tsx:2 \(expression\)/);
 });
 
-test("every route file appears in the diagram and every edge resolves (self-check)", () => {
+test("a link to a missing route is reported as unmatched with file:line, never drawn", () => {
   const root = makeApp("selfcheck", {
     "package.json": "{}",
     "app/page.tsx": `export default () => <a href="/a">a</a>`,
     "app/a/page.tsx": `export default () => <a href="/missing">gone</a>`,
   });
-  const { code, md } = runRamble(root);
+  const { code, md, mmd } = runRamble(root);
   assert.equal(code, 0);
-  assert.match(md, /Self-check: every route file appears/);
-  // /missing has no route: must land in unresolved, never in the diagram.
-  assert.match(md, /`\/missing` at/);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /a"]);
+  assert.match(md, /`\/missing` at app\/a\/page\.tsx:1 \(unmatched\)/);
 });
 
 test("bundled grok-chat fixture maps to its documented shape", () => {
@@ -223,8 +235,9 @@ test("bundled grok-chat fixture maps to its documented shape", () => {
   assert.match(md, /Screens:\*\* 11/);
   assert.match(md, /Parallel route slots[^\n]*:\*\* 1 — @history/);
   assert.match(md, /\(\.\)share under \/c\/:chatId/);
-  assert.match(md, /-\. middleware \.->/);
-  assert.match(md, /Self-check: every route file appears/);
+  assert.match(md, /Edges:\*\* 18 \(1 redirect/);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 0/);
+  assert.ok(graph(readFileSync(path.join(out, "flow.mmd"), "utf8")).edges.includes("middleware -middleware-> /login"));
 });
 
 test("no routers found is a usage error", () => {
@@ -239,4 +252,467 @@ test("--thumbs without --base-url is a usage error", () => {
   const res = spawnSync(process.execPath, [CLI, root, "--thumbs"], { encoding: "utf8" });
   assert.equal(res.status, 2);
   assert.match(res.stdout + res.stderr, /--thumbs requires --base-url/);
+});
+
+test("route folders named like build output (build, public, static…) are still routes", () => {
+  const files = { "package.json": "{}", "app/page.tsx": "x" };
+  for (const d of ["build", "out", "public", "static", "dist", "coverage"]) files[`app/${d}/page.tsx`] = "x";
+  const { code, mmd } = runRamble(makeApp("prunednames", files));
+  assert.equal(code, 0);
+  for (const d of ["build", "out", "public", "static", "dist", "coverage"]) {
+    assert.ok(graph(mmd).labels.includes(`/${d}`), `/${d} dropped`);
+  }
+});
+
+test("a symlinked directory loop in the route tree is walked once", () => {
+  const root = makeApp("dirloop", { "package.json": "{}", "app/page.tsx": "x", "app/a/page.tsx": "x" });
+  symlinkSync("..", path.join(root, "app", "a", "loop"));
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels.sort(), ["/", "/a"]);
+  assert.match(md, /Screens:\*\* 2 /);
+});
+
+test("broken symlinks and unreadable directories do not crash the scan", () => {
+  const root = makeApp("broken", { "package.json": "{}", "app/page.tsx": "x", "src/locked/a.ts": "x" });
+  symlinkSync("./nope.ts", path.join(root, "broken.ts"));
+  symlinkSync("./nope", path.join(root, "app", "gone"));
+  chmodSync(path.join(root, "src", "locked"), 0o000);
+  try {
+    const { code, out, mmd } = runRamble(root);
+    assert.equal(code, 0, out);
+    assert.deepEqual(graph(mmd).labels, ["/"]);
+  } finally {
+    chmodSync(path.join(root, "src", "locked"), 0o755);
+  }
+});
+
+test("pages router: only top-level pages/api is API; .d.ts and _middleware are not pages", () => {
+  const root = makeApp("pagesapi", {
+    "package.json": `{"dependencies":{"next":"15"}}`,
+    "pages/index.tsx": "x",
+    "pages/api/hello.ts": "x",
+    "pages/docs/api/intro.tsx": "x",
+    "pages/types.d.ts": "x",
+    "pages/_middleware.ts": "x",
+  });
+  const { code, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels.sort(), ["/", "/docs/api/intro"]);
+});
+
+test("node ids follow sorted route paths, independent of filesystem order", () => {
+  const root = makeApp("order", { "package.json": "{}", "app/page.tsx": "x", "app/zeta/page.tsx": "x", "app/alpha/page.tsx": "x" });
+  const { mmd } = runRamble(root);
+  const ids = [...mmd.matchAll(/^\s*(r\d+)\["(.*)"\]$/gm)].map((m) => `${m[1]}=${m[2]}`);
+  assert.deepEqual(ids, ["r0=/", "r1=/alpha", "r2=/zeta"]);
+});
+
+test("a project inside a folder named app still gets its pages router", () => {
+  const root = makeApp("app/proj", { "package.json": `{"dependencies":{"next":"15"}}`, "pages/index.tsx": "x", "pages/about.tsx": "x" });
+  const { code, out, mmd } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).labels, ["/", "/about"]);
+});
+
+test("a route folder named app is a segment, not a second router", () => {
+  const root = makeApp("nestedapp", { "package.json": "{}", "app/page.tsx": "x", "app/app/page.tsx": "x", "app/app/settings/page.tsx": "x" });
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.match(md, /Routers:\*\* next-app \(app\)\n/);
+  assert.deepEqual(graph(mmd).labels, ["/", "/app", "/app/settings"]);
+});
+
+test("a Vite app's src/pages components folder is not a Next pages router", () => {
+  const root = makeApp("vitepages", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/main.tsx": `createBrowserRouter([{ path: "/" }, { path: "/about" }]);`,
+    "src/pages/Home.tsx": "x",
+    "src/pages/About.tsx": "x",
+  });
+  const { code, md, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.ok(!md.includes("next-pages"), md);
+  assert.deepEqual(graph(mmd).labels, ["/", "/about"]);
+});
+
+test("a pages/ folder holding only api/ is not reported as a router", () => {
+  const root = makeApp("apionly", { "package.json": `{"dependencies":{"next":"15"}}`, "app/page.tsx": "x", "pages/api/auth.ts": "x" });
+  const { md } = runRamble(root);
+  assert.match(md, /Routers:\*\* next-app \(app\)\n/);
+});
+
+test("dotted top-level folders are segments unless they look like hosts; %5F escapes _", () => {
+  const root = makeApp("dotted", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/v1.0/page.tsx": "x",
+    "app/feed.xml/route.ts": "x",
+    "app/%5Finternal/page.tsx": "x",
+    "app/app.example.com/dashboard/page.tsx": "x",
+  });
+  const { code, mmd, md } = runRamble(root);
+  assert.equal(code, 0);
+  assert.ok(mmd.includes('["/v1.0"]'), "version folder treated as a host");
+  assert.ok(mmd.includes('["/_internal"]'));
+  assert.match(mmd, /subgraph \w+\["app · app\.example\.com"\]/);
+  assert.match(md, /API route handlers[^\n]*:\*\* 1/);
+});
+
+test("react-router: JSX-only <Routes> apps are detected and nest by open/close tags", () => {
+  const root = makeApp("rrjsx", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/App.tsx": `import { BrowserRouter, Routes, Route } from "react-router-dom";
+      export default () => (
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/app" element={<Layout />}>
+              <Route index element={<Dash />} />
+              <Route path="inbox" element={<Inbox />} />
+              <Route element={<Shell />}>
+                <Route element={<Settings/>} path="settings" />
+              </Route>
+              <Route
+                path="inbox/:id"
+                element={<Msg />}
+              />
+            </Route>
+            <Route path={"/braced"} element={<B />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      );`,
+  });
+  const { code, out, mmd } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).labels, ["/", "/:rest*", "/app", "/app/inbox", "/app/inbox/:id", "/app/settings", "/braced"]);
+});
+
+test("react-router: path chains through a $-named config resolve", () => {
+  const root = makeApp("rrdollar", {
+    "package.json": "{}",
+    "src/routes.ts": `export const $routes = { home: { path: "/home" } };`,
+    "src/router.tsx": `createBrowserRouter([{ path: $routes.home.path }]);`,
+  });
+  const { code, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels, ["/home"]);
+});
+
+const NEXT_PKG = `{"dependencies":{"next":"15"}}`;
+
+test("pages router: each file's links start at its own route", () => {
+  const root = makeApp("pagesedges", {
+    "package.json": NEXT_PKG,
+    "pages/index.tsx": `export default () => <a href="/about">a</a>`,
+    "pages/about.tsx": `export default () => <a href="/contact">c</a>`,
+    "pages/contact.tsx": `export default () => <a href="/">h</a>`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges.sort(), ["/ -link-> /about", "/about -link-> /contact", "/contact -link-> /"]);
+});
+
+test("layouts, error files, and colocated components are shared: hidden and counted, drawn with --include-shared", () => {
+  const root = makeApp("sharedsrc", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/layout.tsx": `export default () => <a href="/docs">docs</a>`,
+    "app/error.tsx": `export default () => <a href="/docs">docs</a>`,
+    "app/components/nav.tsx": `export const Nav = () => <a href="/docs">docs</a>`,
+    "app/docs/page.tsx": "x",
+  });
+  const hidden = runRamble(root);
+  assert.deepEqual(graph(hidden.mmd).edges, []);
+  assert.match(hidden.md, /Not drawn by design:\*\* 3 shared/);
+  assert.match(hidden.md, /`\/docs` at app\/components\/nav\.tsx:1/);
+  const shown = runRamble(root, ["--include-shared"]);
+  assert.deepEqual(graph(shown.mmd).edges, ["shared -link-> /docs"]);
+});
+
+test("react-router: links start at the route whose element component holds them", () => {
+  const root = makeApp("rrsources", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/router.tsx": `import { createBrowserRouter } from "react-router-dom";
+      import Home from "./pages/Home";
+      import { About as AboutPage } from "./pages/About";
+      const Team = lazy(() => import("./pages/Team"));
+      export const router = createBrowserRouter([
+        { path: "/", element: <Root />, children: [
+          { index: true, element: <Home /> },
+          { path: "about", element: <AboutPage /> },
+          { path: "team", element: <Team /> },
+        ]},
+      ]);`,
+    "src/pages/Home.tsx": `export default () => <Link to="/about">a</Link>`,
+    "src/pages/About.tsx": `export const About = () => <Link to="/team">t</Link>`,
+    "src/pages/Team.tsx": `export default () => { const navigate = useNavigate(); navigate("/"); }`,
+    "src/components/Nav.tsx": `export const Nav = () => <Link to="/team">t</Link>`,
+  });
+  const { code, out, mmd, md } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).edges.sort(), ["/ -link-> /about", "/about -link-> /team", "/team -link-> /"]);
+  assert.match(md, /1 shared/);
+});
+
+test("a middleware redirect survives later quoted strings (config.matcher)", () => {
+  const root = makeApp("mwmatcher", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/login/page.tsx": "x",
+    "src/middleware.ts": `import { NextResponse } from "next/server";
+      export function middleware(req) {
+        if (!auth) return NextResponse.redirect(new URL("/login", req.url));
+        if (x) return NextResponse.rewrite(new URL("/other", req.url));
+      }
+      export const config = { matcher: ["/((?!api|_next).*)"] };`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["middleware -middleware-> /login"]);
+});
+
+test("proxy.ts (Next 16) is middleware; a redux middleware.ts in lib/ is not", () => {
+  const root = makeApp("proxy", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/login/page.tsx": "x",
+    "proxy.ts": `export function proxy(req) { return NextResponse.redirect(new URL("/login", req.url)); }`,
+    "lib/middleware.ts": `export const m = () => (next) => (action) => redirect("/login");`,
+  });
+  const { mmd, md } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["proxy -middleware-> /login"]);
+  assert.match(md, /`\/login` at lib\/middleware\.ts:1/);
+});
+
+test("the most specific route wins; optional catch-alls match their base path", () => {
+  const root = makeApp("specific", {
+    "package.json": "{}",
+    "app/[...slug]/page.tsx": "x",
+    "app/blog/[id]/page.tsx": "x",
+    "app/blog/new/page.tsx": "x",
+    "app/shop/[[...cat]]/page.tsx": "x",
+    "app/page.tsx": `export default () => <>
+      <Link href={\`/blog/\${id}\`}>b</Link>
+      <Link href="/blog/new">n</Link>
+      <Link href="/shop">s</Link>
+      <Link href="/shop/a/b">s2</Link>
+      <Link href="/about/team">cms</Link>
+    </>`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "/ -link-> /:slug*", "/ -link-> /blog/:id", "/ -link-> /blog/new", "/ -link-> /shop/:cat*?",
+  ]);
+});
+
+test("monorepo: links resolve only within their own app", () => {
+  const root = makeApp("mono", {
+    "package.json": `{"private":true}`,
+    "apps/web/package.json": NEXT_PKG,
+    "apps/web/middleware.ts": `export function middleware(req) { return NextResponse.redirect(new URL("/settings", req.url)); }`,
+    "apps/web/app/page.tsx": `export default () => <a href="/settings">s</a>`,
+    "apps/web/app/web-only/page.tsx": "x",
+    "apps/admin/package.json": NEXT_PKG,
+    "apps/admin/app/page.tsx": `export default () => <a href="/web-only">w</a>`,
+    "apps/admin/app/settings/page.tsx": "x",
+  });
+  const { mmd, md } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, []);
+  assert.match(md, /`\/web-only` at apps\/admin\/app\/page\.tsx:1 \(unmatched\)/);
+  assert.match(md, /`\/settings` at apps\/web\/app\/page\.tsx:1 \(unmatched\)/);
+  assert.match(md, /`\/settings` at apps\/web\/middleware\.ts:1 \(unmatched\)/);
+});
+
+test("every navigation call site is an edge or a categorized entry with file:line", () => {
+  const root = makeApp("categories", {
+    "package.json": "{}",
+    "app/a/page.tsx": "x",
+    "app/page.tsx": `export default function P() {
+  const navigate = useNavigate();
+  navigate(-1);
+  router.push({ pathname: "/a", query: { tab: 1 } });
+  return <>
+    <Link href={{ pathname: "/a" }}>obj</Link>
+    <Link href={cond ? "/a" : "/b"}>ternary</Link>
+    <Link href={\`\${base}/a\`}>base</Link>
+    <Link to="../a">rel</Link>
+    <a href="#top">anchor</a>
+    <a href="mailto:x@y.z">mail</a>
+    <a href="//cdn.example.com/x">cdn</a>
+    <a href="https://example.com/y">ext</a>
+    <a href="/gone">missing</a>
+  </>;
+}`,
+  });
+  const { md, mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["/ -link-> /a"]);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 4 \(1 unmatched, 2 expression, 1 relative\)/);
+  assert.match(md, /`cond \? "\/a" : "\/b"` at app\/page\.tsx:7 \(expression\)/);
+  assert.match(md, /`'\$\{base\}\/a'` at app\/page\.tsx:8 \(expression\)/);
+  assert.match(md, /`\.\.\/a` at app\/page\.tsx:9 \(relative\)/);
+  assert.match(md, /`\/gone` at app\/page\.tsx:14 \(unmatched\)/);
+  assert.match(md, /Not drawn by design:\*\* 3 external, 1 anchor, 1 history/);
+  assert.match(md, /External link hosts:\*\* cdn\.example\.com, example\.com\n/);
+  assert.match(md, /`-1` at app\/page\.tsx:3/);
+});
+
+test("comments and look-alike attributes are not navigations", () => {
+  const root = makeApp("lookalike", {
+    "package.json": "{}",
+    "app/a/page.tsx": "x",
+    "app/page.tsx": `// <Link href="/a">old</Link>
+/* router.push("/a") */
+export default () => <>
+  {/* <a href="/a">x</a> */}
+  <div data-href="/a" />
+  <svg><use xlink:href="#icon" /></svg>
+  <p>see https://example.com/docs</p>
+</>;`,
+  });
+  const { md, mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, []);
+  assert.match(md, /Unresolved navigations \(need eyes\):\*\* 0/);
+  assert.match(md, /Not drawn by design:\*\* none/);
+});
+
+test("the console summary always includes the unresolved line", () => {
+  const root = makeApp("console", {
+    "package.json": "{}",
+    "app/page.tsx": `export default () => <a href="/nope">x</a>`,
+    "app/feed/(.)photo/page.tsx": "x",
+    "app/feed/(..)(..)x/page.tsx": "x",
+    "app/feed/page.tsx": "x",
+  });
+  const { out } = runRamble(root);
+  assert.match(out, /Unresolved navigations \(need eyes\):\*\* 1 \(1 unmatched/);
+});
+
+test("next.config per app: redirects and rewrites are drawn with distinct labels", () => {
+  const root = makeApp("nextconfig", {
+    "package.json": `{"private":true}`,
+    "apps/web/package.json": NEXT_PKG,
+    "apps/web/app/page.tsx": "x",
+    "apps/web/app/blog/[slug]/page.tsx": "x",
+    "apps/web/app/login/page.tsx": "x",
+    "apps/web/app/new/page.tsx": "x",
+    "apps/web/next.config.js": `module.exports = {
+  basePath: "/app",
+  async redirects() {
+    return [
+      { source: "/old-blog/:slug", destination: "/blog/:slug", permanent: true },
+      { source: "/legacy", destination: "https://example.com/legacy", permanent: false },
+      { source: "/x", has: [{ type: "header", key: "x-a", value: "1" }], destination: "/new", permanent: true },
+    ];
+  },
+  async rewrites() {
+    return [{ source: "/rw", destination: "/login" }];
+  },
+};`,
+  });
+  const { code, out, mmd, md } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "next.config -redirect /old-blog/:slug-> /blog/:slug",
+    "next.config -redirect /x-> /new",
+    "next.config -rewrite /rw-> /login",
+  ]);
+  assert.match(md, /`redirect \/legacy → https:\/\/example\.com\/legacy` at apps\/web\/next\.config\.js:6/);
+});
+
+test("--max-label truncates config edge labels", () => {
+  const root = makeApp("maxlabel", {
+    "package.json": NEXT_PKG,
+    "app/page.tsx": "x",
+    "next.config.mjs": `export default { redirects: async () => [{ source: "/a-very-long-source-path", destination: "/" }] };`,
+  });
+  const { mmd } = runRamble(root, ["--max-label", "12"]);
+  assert.deepEqual(graph(mmd).edges, ["next.config -redirect /a--> /"]);
+});
+
+test("Mermaid labels escape quotes and subgraph ids never collide", () => {
+  const files = { "package.json": "{}", "app/page.tsx": "x" };
+  for (const d of ["a-b", "a-b/x", "a_b", "a_b/y", 'q"uote', 'q"uote/child']) files[`app/${d}/page.tsx`] = "x";
+  const { code, mmd } = runRamble(makeApp("escaping", files));
+  assert.equal(code, 0);
+  assert.ok(!/\["[^"\]]*"[^"\]]*"\]/.test(mmd), `unescaped quote in a label:\n${mmd}`);
+  assert.ok(mmd.includes('["/q#quot;uote/child"]'));
+  const subgraphIds = [...mmd.matchAll(/subgraph (\w+)\[/g)].map((m) => m[1]);
+  assert.equal(new Set(subgraphIds).size, subgraphIds.length, mmd);
+  assert.equal(subgraphIds.length, 3);
+});
+
+test("numeric flags reject non-integers", () => {
+  const root = makeApp("badnums", { "package.json": "{}", "app/page.tsx": "x" });
+  for (const args of [["--max-label", "abc"], ["--thumb-cap", "0"]]) {
+    const { code, out } = runRamble(root, args);
+    assert.equal(code, 2, out);
+    assert.match(out, /needs a positive integer/);
+  }
+});
+
+function plinthStub(dir) {
+  const stub = path.join(dir, "plinth-stub.mjs");
+  writeFileSync(stub, `import { appendFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(path.join(dir, "calls.jsonl"))}, JSON.stringify(args) + "\\n");
+if (args[0].includes("fail")) { console.error("plinth: capture failed <net::ERR_FAILED>"); process.exit(3); }
+writeFileSync(args[args.indexOf("--out") + 1], "png");
+`);
+  return stub;
+}
+
+test("--thumbs: one plinth call per static route, files named by node id, HTML escaped", () => {
+  const root = makeApp("thumbs", {
+    "package.json": NEXT_PKG,
+    "next.config.js": `module.exports = { basePath: "/docs" };`,
+    "app/page.tsx": "x",
+    "app/a/b/page.tsx": "x",
+    "app/a-b/page.tsx": "x",
+    "app/x<y>/page.tsx": "x",
+    "app/fail/page.tsx": "x",
+    "app/post/[id]/page.tsx": "x",
+  });
+  const out = path.join(root, "ramble-out");
+  const res = spawnSync(process.execPath, [CLI, root, "--out", out, "--thumbs", "--base-url", "http://h:1/;$(touch PWNED)/"], {
+    encoding: "utf8", cwd: root, env: { ...process.env, RAMBLE_PLINTH: plinthStub(root) },
+  });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  const calls = readFileSync(path.join(root, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(calls.map((c) => [c[0], path.basename(c.at(-1))]), [
+    ["http://h:1/;$(touch PWNED)/docs/", "r0-home.png"],
+    ["http://h:1/;$(touch PWNED)/docs/a-b", "r1-a-b.png"],
+    ["http://h:1/;$(touch PWNED)/docs/a/b", "r2-a-b.png"],
+    ["http://h:1/;$(touch PWNED)/docs/fail", "r3-fail.png"],
+    ["http://h:1/;$(touch PWNED)/docs/x<y>", "r5-x-y.png"],
+  ]);
+  assert.ok(!existsSync(path.join(root, "PWNED")));
+  const gallery = readFileSync(path.join(out, "flow-visual.md"), "utf8");
+  assert.ok(gallery.includes("<code>/x&lt;y&gt;</code>"));
+  assert.ok(gallery.includes("plinth: capture failed &lt;net::ERR_FAILED&gt;"));
+  assert.ok(gallery.includes('<img src="thumbs/r2-a-b.png"'));
+  assert.ok(!gallery.includes(".small.png"));
+});
+
+test("--thumbs without plinth installed is a usage error naming RAMBLE_PLINTH", () => {
+  const root = makeApp("noplinth", { "package.json": "{}", "app/page.tsx": "x" });
+  const res = spawnSync(process.execPath, [CLI, root, "--out", path.join(root, "o"), "--thumbs", "--base-url", "http://h"], {
+    encoding: "utf8", env: { ...process.env, RAMBLE_PLINTH: path.join(root, "missing.mjs") },
+  });
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /RAMBLE_PLINTH/);
+});
+
+test("docs match the CLI: default output dir and every flag", () => {
+  const skill = readFileSync(new URL("../SKILL.md", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" }).stdout;
+  assert.match(help, /default: ramble-output\)/);
+  for (const doc of [skill, readme]) assert.ok(doc.includes("ramble-output/flow.md") && !doc.includes("map-output"));
+  const root = makeApp("defaultout", { "package.json": "{}", "app/page.tsx": "x" });
+  const res = spawnSync(process.execPath, [CLI, root], { encoding: "utf8", cwd: root });
+  assert.equal(res.status, 0);
+  assert.ok(existsSync(path.join(root, "ramble-output", "flow.md")));
+  for (const flag of help.match(/--[a-z-]+/g)) {
+    if (flag !== "--help") assert.ok(readme.includes(`\`${flag}`), `README lacks ${flag}`);
+  }
 });
