@@ -79,7 +79,9 @@ export function frameSize(device) {
         height: height + 2 * device.bezel + device.deck.height,
       };
     case "browser":
-      return { width, height: height + device.bar.height };
+      // +2 for the 1px window border on each side: the screenshot must
+      // keep its exact pixel size, never be squeezed by the border.
+      return { width: width + 2, height: height + device.bar.height + 2 };
     default: {
       const exhaustive = device.kind;
       throw new Error(`unhandled device kind: ${exhaustive}`);
@@ -97,7 +99,7 @@ export function screenRect(device) {
     case "laptop":
       return { x: device.bezel + device.deck.overhang, y: device.bezel, ...device.viewport };
     case "browser":
-      return { x: 0, y: device.bar.height, ...device.viewport };
+      return { x: 1, y: device.bar.height + 1, ...device.viewport };
     default: {
       const exhaustive = device.kind;
       throw new Error(`unhandled device kind: ${exhaustive}`);
