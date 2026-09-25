@@ -37,8 +37,8 @@ jobs:
           node-version: 22
       - run: node --test skills/map/scripts/map.test.mjs
 
-  # bezel drives the Chrome preinstalled on ubuntu-latest runners.
-  bezel-cli:
+  # plinth drives the Chrome preinstalled on ubuntu-latest runners.
+  plinth-cli:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +47,6 @@ jobs:
           node-version: 22
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: npm install --no-fund --no-audit
-        working-directory: skills/bezel
+        working-directory: skills/plinth
       - run: npm test
-        working-directory: skills/bezel
+        working-directory: skills/plinth

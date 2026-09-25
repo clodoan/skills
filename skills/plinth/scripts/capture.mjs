@@ -1,7 +1,7 @@
 /**
  * Playwright capture at exact device viewports, DPR-correct.
  * Uses playwright-core driving an installed Chrome/Chromium — no
- * browser download. Install: `cd skills/bezel && npm install`.
+ * browser download. Install: `cd skills/plinth && npm install`.
  */
 
 import { createRequire } from "node:module";
@@ -14,7 +14,7 @@ try {
   ({ chromium } = require("playwright-core"));
 } catch {
   throw new Error(
-    "playwright-core is not installed. Run `npm install` in the bezel skill directory (skills/bezel).",
+    "playwright-core is not installed. Run `npm install` in the plinth skill directory (skills/plinth).",
   );
 }
 
@@ -22,7 +22,7 @@ function launchOptions() {
   const args = [];
   // Chrome refuses to sandbox as root (CI containers, cloud VMs).
   if (typeof process.getuid === "function" && process.getuid() === 0) args.push("--no-sandbox");
-  const executablePath = process.env.BEZEL_BROWSER || undefined;
+  const executablePath = process.env.PLINTH_BROWSER || undefined;
   return executablePath ? { executablePath, args } : { channel: "chrome", args };
 }
 
@@ -33,7 +33,7 @@ export async function withBrowser(fn) {
   } catch (err) {
     throw new Error(
       `could not launch Chrome (${err.message.split("\n")[0]}). ` +
-        "Install Google Chrome/Chromium or point BEZEL_BROWSER at a browser binary.",
+        "Install Google Chrome/Chromium or point PLINTH_BROWSER at a browser binary.",
     );
   }
   try {

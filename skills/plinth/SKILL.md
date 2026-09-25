@@ -1,5 +1,5 @@
 ---
-name: bezel
+name: plinth
 description: >-
   Produce device-framed, DPR-correct screenshots of a running app or URL
   for READMEs, PR bodies, and social posts. Use whenever the user asks
@@ -9,10 +9,10 @@ description: >-
   and composites into generated CSS frames — no design tool needed.
 ---
 
-# Bezel
+# Plinth
 
 Screenshots that look like product shots, straight from the running app.
-Bezel captures a URL at an exact device viewport (DPR-correct, so text
+Plinth captures a URL at an exact device viewport (DPR-correct, so text
 is pixel-sharp) and composites it into a clean generated device frame.
 
 ## Workflow
@@ -24,9 +24,9 @@ is pixel-sharp) and composites it into a clean generated device frame.
 2. Capture:
 
    ```bash
-   node <path-to-skill>/scripts/bezel.mjs http://localhost:3000 --device iphone-15-pro
-   node <path-to-skill>/scripts/bezel.mjs https://myapp.dev --devices iphone-15-pro,macbook-14 --dark
-   node <path-to-skill>/scripts/bezel.mjs https://myapp.dev --device iphone-15-pro --scroll --out demo.mp4
+   node <path-to-skill>/scripts/plinth.mjs http://localhost:3000 --device iphone-15-pro
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --devices iphone-15-pro,macbook-14 --dark
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-15-pro --scroll --out demo.mp4
    ```
 
    Devices: `iphone-15-pro`, `pixel-8`, `ipad-pro-11`, `macbook-14`,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * bezel — DPR-correct screenshots composited into clean device frames.
+ * plinth — DPR-correct screenshots composited into clean device frames.
  *
  * Captures a URL at exact device viewports with Playwright (system
  * Chrome via playwright-core) and composites the shot into a generated
@@ -29,7 +29,7 @@ const MULTI_DPR = 2;
 class UsageError extends Error {}
 
 function usage() {
-  return `Usage: bezel <url> [options]
+  return `Usage: plinth <url> [options]
 
 Captures <url> at an exact device viewport and composites it into a
 generated device frame. Verifies dimensions and frame alignment.
@@ -37,7 +37,7 @@ generated device frame. Verifies dimensions and frame alignment.
 Options:
   --device <id>       Device frame (default: iphone-15-pro)
   --devices <a,b,c>   Multi-device row layout (composited at @2x)
-  --out <file>        Output PNG (default: bezel-<device>.png)
+  --out <file>        Output PNG (default: plinth-<device>.png)
   --bg <value>        Background: ${Object.keys(BACKGROUNDS).join(" | ")} or any CSS value
   --padding <px>      Padding around the frame (default 48)
   --no-shadow         Disable the drop shadow
@@ -257,7 +257,7 @@ async function main() {
     if (opts.scroll) {
       if (multi) throw new UsageError("--scroll works with a single --device");
       const device = DEVICES[opts.deviceIds[0]];
-      const outFile = opts.out ?? `bezel-${opts.deviceIds[0]}-scroll.mp4`;
+      const outFile = opts.out ?? `plinth-${opts.deviceIds[0]}-scroll.mp4`;
       mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
       await renderScroll(browser, opts, device, outFile);
       return;
@@ -266,7 +266,7 @@ async function main() {
     const shots = [];
     for (const id of opts.deviceIds) {
       const device = DEVICES[id];
-      console.log(`bezel · capturing ${opts.url} as ${id} (${device.viewport.width}×${device.viewport.height} @${device.dpr}x)`);
+      console.log(`plinth · capturing ${opts.url} as ${id} (${device.viewport.width}×${device.viewport.height} @${device.dpr}x)`);
       const shot = await capture(browser, opts.url, {
         viewport: device.viewport, dpr: device.dpr, dark: opts.dark,
         hide: opts.hide, waitMs: opts.wait,
@@ -282,7 +282,7 @@ async function main() {
     const dprOut = multi ? MULTI_DPR : shots[0].device.dpr;
     const { buffer } = await composite(browser, stageHtml(frames, opts), dprOut);
 
-    const outFile = opts.out ?? `bezel-${multi ? "multi" : opts.deviceIds[0]}.png`;
+    const outFile = opts.out ?? `plinth-${multi ? "multi" : opts.deviceIds[0]}.png`;
     mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
     writeFileSync(outFile, buffer);
     const dims = pngSize(buffer);
@@ -291,7 +291,7 @@ async function main() {
     if (!multi) {
       const ok = verifySingle({ shot: shots[0].shot, out: buffer, device: shots[0].device, opts });
       if (!ok) {
-        console.error("bezel: verification failed — see checks above");
+        console.error("plinth: verification failed — see checks above");
         process.exit(EXIT_CHECK);
       }
     } else {
@@ -304,11 +304,11 @@ try {
   await main();
 } catch (err) {
   if (err instanceof UsageError) {
-    console.error(`bezel: ${err.message}`);
+    console.error(`plinth: ${err.message}`);
     console.error("");
     console.error(usage());
     process.exit(EXIT_USAGE);
   }
-  console.error(`bezel: ${err?.message ?? err}`);
+  console.error(`plinth: ${err?.message ?? err}`);
   process.exit(EXIT_USAGE);
 }
