@@ -2,7 +2,7 @@
 #
 # Copy this file into your repo's .github/workflows/ directory.
 # Escape hatch: add the `chip-override` PR label, or put a
-# "Chip-Override: <reason>" trailer in a commit message.
+# "Chip-Override: <reason>" line in the PR's newest commit message.
 #
 # ubuntu-latest ships with a recent Node, so no setup step is needed.
 
@@ -10,27 +10,40 @@ name: chip
 
 on:
   pull_request:
-    # labeled/unlabeled so toggling the chip-override label re-runs the check
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # labeled/unlabeled so toggling chip-override re-runs the check; edited
+    # so retargeting the base branch re-runs it. There is deliberately no
+    # job-level `if` filtering these: a skipped required check counts as
+    # passing, so an unrelated label would turn a failure green.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
+
+concurrency:
+  group: chip-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   chip:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # full history so merge-base and commit-trailer detection work
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Fetch chip-check
-        # For supply-chain safety, pin the ref to a commit SHA once you adopt this:
-        # https://raw.githubusercontent.com/clodoan/skills/<commit-sha>/skills/chip/scripts/chip-check.mjs
+      - name: Fetch chip-check (pinned commit + checksum)
+        # To upgrade, set both values from the new commit:
+        #   git show <sha>:skills/chip/scripts/chip-check.mjs | sha256sum
         # If you vendor the skill into your repo (e.g. .agents/skills/chip/),
         # delete this step and run the vendored script directly.
-        run: curl -fsSL "https://raw.githubusercontent.com/clodoan/skills/main/skills/chip/scripts/chip-check.mjs" -o /tmp/chip-check.mjs
+        env:
+          CHIP_COMMIT: e8f4ad48705660af53088ab32f4d7d4a7e1368f4
+          CHIP_SHA256: 7438a54233a090fd6b8b94813e05080ec222ca016ecdc33d9d81bf793af686b3
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/clodoan/skills/${CHIP_COMMIT}/skills/chip/scripts/chip-check.mjs" -o "$RUNNER_TEMP/chip-check.mjs"
+          echo "${CHIP_SHA256}  $RUNNER_TEMP/chip-check.mjs" | sha256sum -c -
 
       - name: chip-check
         env:
@@ -41,4 +54,4 @@ jobs:
           if [ -n "$HAS_OVERRIDE_LABEL" ]; then
             args+=(--override "PR label: chip-override")
           fi
-          node /tmp/chip-check.mjs "${args[@]}"
+          node "$RUNNER_TEMP/chip-check.mjs" "${args[@]}"
