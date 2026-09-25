@@ -1,0 +1,94 @@
+# Scrub
+
+Frame-by-frame UI animation inspection for coding agents. Drop a screen
+recording (CleanShot X, QuickTime, Screen Studio, a `.gif`) into your
+agent chat, and the agent runs one script and reads the results — no
+setup beyond ffmpeg.
+
+Agents can't watch videos. Scrub converts a recording into things an
+agent reads well: an `index.md`, contact sheets stamped with frame
+numbers and milliseconds, difference images, and a per-frame motion
+table.
+
+## Quick start
+
+```bash
+node skills/scrub/scripts/scrub.mjs recording.mp4
+# → recording-scrub/index.md  (read this first)
+```
+
+Requires ffmpeg + ffprobe on PATH (`brew install ffmpeg` /
+`apt-get install ffmpeg`) and Node ≥ 18. No other dependencies.
+
+## What it produces
+
+```
+recording-scrub/
+  index.md            metadata, motion summary, per-frame table — the entry point
+  overview.png        16 frames sampled evenly across the whole clip
+  sheets/sheet-*.png  dense 4×4 grids of the active window, cropped to motion,
+                      each cell stamped f<frame> <ms>ms
+  sheets/diff-*.png   consecutive-frame differences (brightened): what moved
+  motion.csv          frame, ms, motion bbox (x y w h), center, changed pixels
+  motion-curve.svg    plotted x/y center + changed-pixel curves
+  work/normalized.mp4 the constant-fps clip all frame numbers refer to
+```
+
+## What it handles
+
+- **Variable frame rate** — CleanShot and QuickTime recordings are often
+  VFR; scrub detects it from packet timestamps and normalizes to a
+  constant rate before any frame math, so `frame × (1000/fps)` is always
+  honest. The index states when this happened.
+- **Still head/tail** — trimmed automatically; only the window where
+  something moves gets dense treatment.
+- **Motion crop** — sheets are cropped to the bounding box of all motion
+  (padded), and small crops are upscaled up to 4× (nearest-neighbor, so
+  pixels stay inspectable).
+- **Long clips** — dense frames are capped (default 96): short clips get
+  every frame, medium clips a uniform stride, long clips the frames with
+  the most pixel change (motion peaks). The overview always spans the
+  full clip.
+- **Retina hint** — high-resolution captures are flagged as likely 2x so
+  px can be halved into pt. It's a heuristic; verify against a known
+  element size.
+
+## Honesty about the numbers
+
+The motion table is **estimated from pixel differencing between
+consecutive frames** — it is not the real animation values. The bbox of
+a diff spans both the old and the new position of whatever moved;
+fades, blurs, and sub-pixel motion register as changed pixels without a
+clean box. Treat the curve as shape evidence (where motion starts,
+eases, overshoots, settles) and confirm positions visually on the
+sheets.
+
+## Options
+
+```
+--out <dir>        output directory (default <video>-scrub)
+--fps <n>          override the normalized frame rate
+--grid <n>         sheet grid (default 4 = 16 cells per sheet)
+--max-frames <n>   cap on dense frames (default 96)
+--pad <px>         padding around the motion crop (default 24)
+--no-crop          keep the full frame
+--keep-work        keep intermediate filter scripts and metadata
+```
+
+## Future mode (not in this version)
+
+Driving a browser to capture the animation directly (Playwright/CDP
+capture with device-pixel-ratio awareness and interaction scripting) is
+a planned second input mode. This version is video-first: it analyzes
+recordings you already have.
+
+## Tests
+
+```bash
+node --test skills/scrub/scripts/scrub.test.mjs
+```
+
+The suite generates synthetic ffmpeg clips (a moving box with known
+back-ease-out overshoot, a VFR retiming of it, a still clip, a long
+oscillation, a GIF) and asserts the recovered motion matches within
+tolerance. Tests self-skip when ffmpeg is not installed.
