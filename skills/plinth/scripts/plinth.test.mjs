@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { DEVICES, frameSize, screenRect, contentRect } from "./devices.mjs";
 import { decodePng, getPixel, pngSize, colorDistance } from "./png.mjs";
 import { browserAvailable, withBrowser } from "./capture.mjs";
+import { contentMismatch, chromePresence, MAX_MISMATCH, MIN_CHROME } from "./verify.mjs";
 
 const CLI = fileURLToPath(new URL("./plinth.mjs", import.meta.url));
 const PAD = 48;
@@ -67,9 +68,9 @@ function runPlinth(args, env = process.env) {
 const renders = new Map();
 function render(name, args) {
   if (!renders.has(name)) {
-    const out = path.join(dir, `${name}.png`);
-    const res = runPlinth([...args, "--out", out]);
-    renders.set(name, { ...res, out, img: res.code === 0 ? decodePng(readFileSync(out)) : null });
+    const file = path.join(dir, `${name}.png`);
+    const res = runPlinth([...args, "--out", file]);
+    renders.set(name, { ...res, file, img: res.code === 0 ? decodePng(readFileSync(file)) : null });
   }
   return renders.get(name);
 }
@@ -115,7 +116,7 @@ test("standalone: DPR-exact safe-area capture, exact dims, all checks pass", opt
 
   const d = DEVICES["iphone-16-pro"];
   const size = frameSize(d);
-  const dims = pngSize(readFileSync(res.out));
+  const dims = pngSize(readFileSync(res.file));
   assert.equal(dims.width, Math.round((size.width + 2 * PAD) * d.dpr));
   assert.equal(dims.height, Math.round((size.height + 2 * PAD) * d.dpr));
 });
@@ -306,9 +307,9 @@ test("unknown device is a usage error listing devices", () => {
 });
 
 test("png decoder round-trips Chromium output", opts, () => {
-  const { out } = phone();
-  const img = decodePng(readFileSync(out));
-  assert.equal(img.width, pngSize(readFileSync(out)).width);
+  const { file } = phone();
+  const img = decodePng(readFileSync(file));
+  assert.equal(img.width, pngSize(readFileSync(file)).width);
   assert.equal(getPixel(img, 0, 0).length, 4);
 });
 
@@ -475,4 +476,52 @@ test("runtime failures exit 3 with a one-line message", opts, () => {
   assert.equal(noFfmpeg.code, 3, noFfmpeg.out);
   assert.match(noFfmpeg.out, /needs ffmpeg/);
   assert.doesNotMatch(noFfmpeg.out, /node:events|at .*\(/);
+});
+
+/** Copy of a decoded image's pt rect (frame-relative, PAD included). */
+function cropPt(img, device, x, y, w, h) {
+  const px = (v) => Math.round((PAD + v) * device.dpr);
+  const [x0, y0, width, height] = [px(x), px(y), Math.round(w * device.dpr), Math.round(h * device.dpr)];
+  const pixels = Buffer.alloc(width * height * img.channels);
+  for (let row = 0; row < height; row++) {
+    const from = ((y0 + row) * img.width + x0) * img.channels;
+    img.pixels.copy(pixels, row * width * img.channels, from, from + width * img.channels);
+  }
+  return { width, height, channels: img.channels, pixels };
+}
+
+function mutated(img, fn) {
+  const copy = { ...img, pixels: Buffer.from(img.pixels) };
+  fn(copy);
+  return copy;
+}
+
+test("checks catch shifted content and missing chrome that dimension checks miss", opts, () => {
+  const d = DEVICES["iphone-16-pro"];
+  const { img } = phone();
+  const sr = screenRect(d), cr = contentRect(d, "standalone");
+  const capture = cropPt(img, d, sr.x + cr.x, sr.y + cr.y, cr.width, cr.height);
+  const bands = { top: getPixel(img, ...absPx(d, d.pt.width / 2, 2)), bottom: getPixel(img, ...absPx(d, 20, d.pt.height - 20)) };
+  assert.equal(contentMismatch(img, capture, d, "standalone", PAD).bad, 0);
+  assert.ok(chromePresence(img, d, "standalone", PAD, bands).every((r) => r.fraction >= MIN_CHROME));
+
+  // Content drawn 30pt low (the audit's M1 mutation): rows move down.
+  const rowBytes = img.width * img.channels;
+  const [, top] = absPx(d, 0, cr.y), [, bottom] = absPx(d, 0, cr.y + cr.height);
+  const shift = 30 * d.dpr;
+  const shifted = mutated(img, (m) => img.pixels.copy(m.pixels, (top + shift) * rowBytes, top * rowBytes, (bottom - shift) * rowBytes));
+  assert.ok(contentMismatch(shifted, capture, d, "standalone", PAD).fraction > MAX_MISMATCH, "30pt shift not detected");
+
+  // Chrome wiped to the flat band (the audit's markup-injection result).
+  const [, statusEnd] = absPx(d, 0, cr.y);
+  const [bandX, bandY] = absPx(d, d.pt.width / 2, 2);
+  const wiped = mutated(img, (m) => {
+    for (let y = absPx(d, 0, 0)[1]; y < statusEnd; y++) {
+      for (let x = absPx(d, 0, 0)[0]; x < absPx(d, d.pt.width, 0)[0]; x++) {
+        img.pixels.copy(m.pixels, (y * img.width + x) * img.channels, (bandY * img.width + bandX) * img.channels, (bandY * img.width + bandX + 1) * img.channels);
+      }
+    }
+  });
+  const status = chromePresence(wiped, d, "standalone", PAD, bands).find((r) => r.name === "status bar");
+  assert.ok(status.fraction < MIN_CHROME, "wiped status bar not detected");
 });
