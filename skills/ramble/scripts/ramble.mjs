@@ -55,6 +55,12 @@ Outputs: flow.md (diagram + report), flow.mmd (raw Mermaid), and with
 Exit codes: 0 ok, 2 usage error.`;
 }
 
+function positiveInt(flag, value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new UsageError(`${flag} needs a positive integer, got "${value}"`);
+  return n;
+}
+
 function parseArgs(argv) {
   const opts = {
     root: null, out: "ramble-output", includeShared: false, maxLabel: 24,
@@ -70,10 +76,10 @@ function parseArgs(argv) {
     switch (arg) {
       case "--out": opts.out = next(); break;
       case "--include-shared": opts.includeShared = true; break;
-      case "--max-label": opts.maxLabel = Number(next()); break;
+      case "--max-label": opts.maxLabel = positiveInt(arg, next()); break;
       case "--thumbs": opts.thumbs = true; break;
       case "--base-url": opts.baseUrl = next(); break;
-      case "--thumb-cap": opts.thumbCap = Number(next()); break;
+      case "--thumb-cap": opts.thumbCap = positiveInt(arg, next()); break;
       case "-h":
       case "--help":
         console.log(usage());
@@ -846,22 +852,46 @@ function collectEdges({ rootDir, files, routes, includeShared, nextProjects, res
   return { edges, dropped, external: [...external] };
 }
 
-// next.config redirects()
-function collectConfigRedirects({ rootDir, resolve, special }) {
+function enclosingBrace(text, index) {
+  let depth = 0;
+  for (let j = index - 1; j >= 0; j--) {
+    if (text[j] === "}") depth++;
+    else if (text[j] === "{" && depth-- === 0) return j;
+  }
+  return -1;
+}
+
+/** next.config redirects() and rewrites(), per Next project. */
+function collectConfigEdges({ rootDir, nextProjects, resolve, special }) {
   const edges = [];
-  for (const name of NEXT_CONFIG_NAMES) {
-    const file = path.join(rootDir, name);
-    if (!existsSync(file)) continue;
-    const text = readText(file);
-    const re = /source\s*:\s*["'`]([^"'`]+)["'`][\s\S]{0,200}?destination\s*:\s*["'`]([^"'`]+)["'`]/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const target = normalizeTarget(m[2]);
-      const to = target.value ? resolve(target.value, { project: rootDir }) : null;
-      if (to) edges.push({ source: special("middleware", null), target: to, kind: "config-redirect" });
+  const dropped = [];
+  for (const project of nextProjects) {
+    for (const name of NEXT_CONFIG_NAMES) {
+      const file = path.join(project, name);
+      const text = existsSync(file) ? stripComments(readText(file)) : "";
+      if (!text) continue;
+      const starts = (fn) => [...text.matchAll(new RegExp(`\\b${fn}\\s*[(:]`, "g"))].map((x) => x.index);
+      const redirectsAt = starts("redirects");
+      const rewritesAt = starts("rewrites");
+      const lastBefore = (list, i) => Math.max(-1, ...list.filter((x) => x < i));
+      for (const m of text.matchAll(/\bsource\s*:/g)) {
+        const open = enclosingBrace(text, m.index);
+        const obj = open === -1 ? null : extractObjectLiteral(text, open);
+        const from = obj && objectValue(obj, "source");
+        const to = obj && objectValue(obj, "destination");
+        if (typeof from !== "string" || typeof to !== "string") continue;
+        const kind = lastBefore(rewritesAt, m.index) > lastBefore(redirectsAt, m.index) ? "rewrite" : "redirect";
+        const target = normalizeTarget(to);
+        const resolved = target.value ? resolve(target.value, { project }) : null;
+        if (!resolved) {
+          dropped.push({ category: target.category ?? "unmatched", value: `${kind} ${from} → ${to}`, file: path.relative(rootDir, file), line: lineOf(text, m.index) });
+          continue;
+        }
+        edges.push({ source: special("next.config", project), target: resolved, kind, label: `${kind} ${from}` });
+      }
     }
   }
-  return { edges, dropped: [] };
+  return { edges, dropped };
 }
 
 // --------------------------------------------------------------- mermaid
@@ -978,7 +1008,7 @@ function main() {
   const nav = collectEdges({
     rootDir, files, routes: finalRoutes, includeShared: opts.includeShared, nextProjects, resolve, special,
   });
-  const config = collectConfigRedirects({ rootDir, resolve, special });
+  const config = collectConfigEdges({ rootDir, nextProjects, resolve, special });
   const edges = [...nav.edges, ...config.edges];
   const dropped = [...nav.dropped, ...config.dropped];
 

@@ -586,3 +586,66 @@ test("the console summary always includes the unresolved line", () => {
   const { out } = runRamble(root);
   assert.match(out, /Unresolved navigations \(need eyes\):\*\* 1 \(1 unmatched/);
 });
+
+test("next.config per app: redirects and rewrites are drawn with distinct labels", () => {
+  const root = makeApp("nextconfig", {
+    "package.json": `{"private":true}`,
+    "apps/web/package.json": NEXT_PKG,
+    "apps/web/app/page.tsx": "x",
+    "apps/web/app/blog/[slug]/page.tsx": "x",
+    "apps/web/app/login/page.tsx": "x",
+    "apps/web/app/new/page.tsx": "x",
+    "apps/web/next.config.js": `module.exports = {
+  basePath: "/app",
+  async redirects() {
+    return [
+      { source: "/old-blog/:slug", destination: "/blog/:slug", permanent: true },
+      { source: "/legacy", destination: "https://example.com/legacy", permanent: false },
+      { source: "/x", has: [{ type: "header", key: "x-a", value: "1" }], destination: "/new", permanent: true },
+    ];
+  },
+  async rewrites() {
+    return [{ source: "/rw", destination: "/login" }];
+  },
+};`,
+  });
+  const { code, out, mmd, md } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "next.config -redirect /old-blog/:slug-> /blog/:slug",
+    "next.config -redirect /x-> /new",
+    "next.config -rewrite /rw-> /login",
+  ]);
+  assert.match(md, /`redirect \/legacy → https:\/\/example\.com\/legacy` at apps\/web\/next\.config\.js:6/);
+});
+
+test("--max-label truncates config edge labels", () => {
+  const root = makeApp("maxlabel", {
+    "package.json": NEXT_PKG,
+    "app/page.tsx": "x",
+    "next.config.mjs": `export default { redirects: async () => [{ source: "/a-very-long-source-path", destination: "/" }] };`,
+  });
+  const { mmd } = runRamble(root, ["--max-label", "12"]);
+  assert.deepEqual(graph(mmd).edges, ["next.config -redirect /a--> /"]);
+});
+
+test("Mermaid labels escape quotes and subgraph ids never collide", () => {
+  const files = { "package.json": "{}", "app/page.tsx": "x" };
+  for (const d of ["a-b", "a-b/x", "a_b", "a_b/y", 'q"uote', 'q"uote/child']) files[`app/${d}/page.tsx`] = "x";
+  const { code, mmd } = runRamble(makeApp("escaping", files));
+  assert.equal(code, 0);
+  assert.ok(!/\["[^"\]]*"[^"\]]*"\]/.test(mmd), `unescaped quote in a label:\n${mmd}`);
+  assert.ok(mmd.includes('["/q#quot;uote/child"]'));
+  const subgraphIds = [...mmd.matchAll(/subgraph (\w+)\[/g)].map((m) => m[1]);
+  assert.equal(new Set(subgraphIds).size, subgraphIds.length, mmd);
+  assert.equal(subgraphIds.length, 3);
+});
+
+test("numeric flags reject non-integers", () => {
+  const root = makeApp("badnums", { "package.json": "{}", "app/page.tsx": "x" });
+  for (const args of [["--max-label", "abc"], ["--thumb-cap", "0"]]) {
+    const { code, out } = runRamble(root, args);
+    assert.equal(code, 2, out);
+    assert.match(out, /needs a positive integer/);
+  }
+});
