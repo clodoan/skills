@@ -1,0 +1,44 @@
+# Chip — fail PRs that aren't chipped into small steps.
+#
+# Copy this file into your repo's .github/workflows/ directory.
+# Escape hatch: add the `chip-override` PR label, or put a
+# "Chip-Override: <reason>" trailer in a commit message.
+#
+# ubuntu-latest ships with a recent Node, so no setup step is needed.
+
+name: chip
+
+on:
+  pull_request:
+    # labeled/unlabeled so toggling the chip-override label re-runs the check
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  chip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history so merge-base and commit-trailer detection work
+          fetch-depth: 0
+
+      - name: Fetch chip-check
+        # For supply-chain safety, pin the ref to a commit SHA once you adopt this:
+        # https://raw.githubusercontent.com/clodoan/skills/<commit-sha>/skills/chip/scripts/chip-check.mjs
+        # If you vendor the skill into your repo (e.g. .agents/skills/chip/),
+        # delete this step and run the vendored script directly.
+        run: curl -fsSL "https://raw.githubusercontent.com/clodoan/skills/main/skills/chip/scripts/chip-check.mjs" -o /tmp/chip-check.mjs
+
+      - name: chip-check
+        env:
+          HAS_OVERRIDE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'true' || '' }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          args=(--range "origin/${BASE_REF}...HEAD")
+          if [ -n "$HAS_OVERRIDE_LABEL" ]; then
+            args+=(--override "PR label: chip-override")
+          fi
+          node /tmp/chip-check.mjs "${args[@]}"
