@@ -439,6 +439,7 @@ test("usage errors exit 2 before any capture", async () => {
     ["--device", "macbook-14", "--mode", "bare"],
     ["--out", "shot.jpg"], ["--scroll", "--out", "demo.png"], ["--scroll", "--out", "demo.webm"],
     ["--scroll", "--devices", "iphone-16-pro,pixel-8"],
+    ["--hide", "#cookie{} body{display:none"],
   ];
   for (const args of cases) {
     const res = runPlinth([baseUrl, ...args]);

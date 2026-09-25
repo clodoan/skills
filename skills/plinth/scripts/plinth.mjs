@@ -168,6 +168,8 @@ export function parseArgs(argv) {
   }
   if (!(opts.frame in { dark: 1, light: 1 })) throw new UsageError("--frame must be dark or light");
   if (opts.bg !== null && BG_UNSAFE.test(opts.bg)) throw new UsageError("--bg must be a preset or a CSS color/gradient");
+  // --hide becomes a CSS rule in the page: selectors must not open rules.
+  if (opts.hide.some((sel) => /[{}<]/.test(sel))) throw new UsageError("--hide takes CSS selectors (no braces)");
   return opts;
 }
 
