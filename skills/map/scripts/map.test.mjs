@@ -214,6 +214,19 @@ test("every route file appears in the diagram and every edge resolves (self-chec
   assert.match(md, /`\/missing` at/);
 });
 
+test("bundled grok-chat fixture maps to its documented shape", () => {
+  const fixture = fileURLToPath(new URL("../fixtures/grok-chat", import.meta.url));
+  const out = path.join(base, "grokchat-out");
+  const res = spawnSync(process.execPath, [CLI, fixture, "--out", out], { encoding: "utf8" });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  const md = readFileSync(path.join(out, "flow.md"), "utf8");
+  assert.match(md, /Screens:\*\* 11/);
+  assert.match(md, /Parallel route slots[^\n]*:\*\* 1 — @history/);
+  assert.match(md, /\(\.\)share under \/c\/:chatId/);
+  assert.match(md, /-\. middleware \.->/);
+  assert.match(md, /Self-check: every route file appears/);
+});
+
 test("no routers found is a usage error", () => {
   const root = makeApp("empty", { "README.md": "nothing here" });
   const { code, out } = runMap(root);
