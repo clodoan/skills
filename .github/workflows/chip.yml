@@ -1,0 +1,23 @@
+# Dogfood: run the chip check on this repo's own PRs.
+# Escape hatch: `chip-override` PR label, or a `Chip-Override: <reason>`
+# commit trailer in the PR. See chip/README.md.
+name: chip
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  chip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: chip — smallest responsible step
+        env:
+          CHIP_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'PR label: chip-override' || '' }}
+        run: |
+          node chip/scripts/chip.mjs --base "origin/${GITHUB_BASE_REF}" --override "$CHIP_OVERRIDE"

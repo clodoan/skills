@@ -1,0 +1,9 @@
+{
+  "base": "origin/main",
+  "budgets": {
+    "maxLines": 400,
+    "maxFiles": 15,
+    "maxAreas": 3,
+    "maxRiskySurfaces": 1
+  }
+}
