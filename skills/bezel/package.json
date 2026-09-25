@@ -1,0 +1,12 @@
+{
+  "name": "bezel-skill",
+  "private": true,
+  "type": "module",
+  "description": "Device-framed, DPR-correct app screenshots for coding agents",
+  "scripts": {
+    "test": "node --test scripts/bezel.test.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}
