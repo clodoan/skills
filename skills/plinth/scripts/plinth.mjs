@@ -21,11 +21,14 @@ import process from "node:process";
 
 import {
   DEVICES, BACKGROUNDS, deviceList, frameSize, screenRect, contentRect,
-  buildDeviceHtml, buildScreenHtml,
+  buildDeviceHtml, buildScreenHtml, squirclePoints,
 } from "./devices.mjs";
 import { withBrowser, capture } from "./capture.mjs";
 import { pngSize, decodePng, getPixel, colorDistance } from "./png.mjs";
 import { findFrame, analyzeFrame, FRAME_MANIFEST } from "./frames.mjs";
+import { deviceGeometry, renderStill, renderLoop } from "./render3d.mjs";
+
+const VIEWS = ["flat", "hero", "tilt-left", "tilt-right", "top-down", "fan", "combo"];
 
 const require = createRequire(import.meta.url);
 
@@ -39,18 +42,27 @@ const MULTI_DPR = 2;
 class UsageError extends Error {}
 
 function usage() {
-  return `Usage: plinth <url> [options]
+  return `Usage: plinth <url-or-screenshot.png> [options]
 
-Captures <url> at an exact device viewport (safe-area aware) and
-composites it into a spec-accurate device frame with faithful chrome.
+Captures <url> at an exact device viewport (safe-area aware), builds a
+procedural three.js device from the cited spec table, and renders it —
+flat (orthographic, pixel-exact) or floating in 3D. A .png path can be
+given instead of a URL to frame an existing screenshot.
 
 Options:
   --device <id>       Device frame (default: iphone-16-pro)
-  --devices <a,b,c>   Multi-device row layout (composited at @2x)
-  --mode <m>          Phone/tablet presentation: standalone (app-style,
-                      status bar + home indicator, default) | safari
-                      (mobile Safari with compact bottom bar) | bare
-                      (full-bleed, content under everything)
+  --devices <a,b,c>   Several devices (2D row in flat view; fan/combo in 3D)
+  --view <v>          flat (default) | hero | tilt-left | tilt-right |
+                      top-down | fan | combo
+  --float <pt>        Float height for 3D views (default 26)
+  --transparent       Transparent background (PNG alpha)
+  --scale <n>         Output pixel ratio for 3D views (default 2; flat
+                      always renders at the device DPR)
+  --size <WxH>        Canvas size for 3D views (default 1600x1200)
+  --turntable         Seamless float/turntable loop → mp4/gif (ffmpeg)
+  --mode <m>          Phone/tablet presentation: app|standalone (default:
+                      status bar + home indicator, content in the safe
+                      area) | safari (compact bottom bar) | bare
   --status <s>        Status bar content: auto (from page luminance,
                       default) | light | dark
   --buttons           Draw side buttons on phone frames
@@ -79,6 +91,8 @@ function parseArgs(argv) {
   const opts = {
     url: null, device: "iphone-16-pro", devices: null, out: null,
     mode: "standalone", status: "auto", buttons: false, frame: null,
+    view: "flat", float: 26, transparent: false, scale: 2,
+    size: { width: 1600, height: 1200 }, turntable: false,
     bg: null, padding: 48, shadow: true, dark: false, frameTheme: "dark",
     hide: [], wait: 800, scroll: false,
   };
@@ -95,6 +109,17 @@ function parseArgs(argv) {
       case "--mode": opts.mode = next(); break;
       case "--status": opts.status = next(); break;
       case "--buttons": opts.buttons = true; break;
+      case "--view": opts.view = next(); break;
+      case "--float": opts.float = Number(next()); break;
+      case "--transparent": opts.transparent = true; break;
+      case "--scale": opts.scale = Number(next()); break;
+      case "--size": {
+        const m = next().match(/^(\d+)x(\d+)$/);
+        if (!m) throw new UsageError("--size must look like 1600x1200");
+        opts.size = { width: Number(m[1]), height: Number(m[2]) };
+        break;
+      }
+      case "--turntable": opts.turntable = true; break;
       case "--out": opts.out = next(); break;
       case "--bg": opts.bg = next(); break;
       case "--padding": opts.padding = Number(next()); break;
@@ -116,15 +141,27 @@ function parseArgs(argv) {
         opts.url = arg;
     }
   }
-  if (!opts.url) throw new UsageError("missing URL");
-  if (!/^[a-z]+:\/\//.test(opts.url)) opts.url = `https://${opts.url}`;
+  if (!opts.url) throw new UsageError("missing URL or screenshot file");
+  if (opts.url.endsWith(".png") && existsSync(opts.url)) {
+    opts.inputFile = path.resolve(opts.url);
+    opts.url = `file://${path.basename(opts.inputFile)}`;
+  } else if (!/^[a-z]+:\/\//.test(opts.url)) {
+    opts.url = `https://${opts.url}`;
+  }
   const ids = opts.devices ?? [opts.device];
   for (const id of ids) {
     if (!DEVICES[id]) throw new UsageError(`unknown device "${id}"\n\nDevices:\n${deviceList()}`);
   }
   opts.deviceIds = ids;
+  if (opts.mode === "app") opts.mode = "standalone";
   if (!["standalone", "safari", "bare"].includes(opts.mode)) {
-    throw new UsageError("--mode must be standalone, safari, or bare");
+    throw new UsageError("--mode must be app/standalone, safari, or bare");
+  }
+  if (!VIEWS.includes(opts.view)) {
+    throw new UsageError(`--view must be one of: ${VIEWS.join(", ")}`);
+  }
+  if (opts.view === "fan" && opts.deviceIds.length === 1) {
+    opts.deviceIds = [ids[0], ids[0], ids[0]]; // fan of three of the same device
   }
   if (!["auto", "light", "dark"].includes(opts.status)) {
     throw new UsageError("--status must be auto, light, or dark");
@@ -226,8 +263,8 @@ function deviceHtmlFor(device, shot, analysis, opts, contentHtmlOverride) {
 
 /**
  * Screenshot the screen layers alone (no clip, no frame) at the given
- * scale. In frame mode the island/punch hole is excluded — the real
- * bezel art draws it.
+ * scale. The island/punch hole is excluded: real bezel art (or the 3D
+ * island geometry) draws it.
  */
 async function renderScreenTexture(browser, device, shot, analysis, opts, scale) {
   const { statusColor, indicatorColor } = chromeColors(analysis, opts);
@@ -260,6 +297,102 @@ async function renderScreenTexture(browser, device, shot, analysis, opts, scale)
   } finally {
     await context.close();
   }
+}
+
+// 3D background config from the 2D presets / CSS values.
+const BG3D = {
+  studio: { type: "gradient", a: "#f4f5f7", b: "#c9cdd6" },
+  "studio-dark": { type: "gradient", a: "#1c1d22", b: "#0a0b0e" },
+  sunset: { type: "gradient", a: "#fde5d0", b: "#c9c3ef" },
+  ocean: { type: "gradient", a: "#d8ecf5", b: "#a9c3e8" },
+  none: { type: "transparent" },
+};
+
+function bg3d(opts) {
+  if (opts.transparent) return { type: "transparent" };
+  if (opts.bg) return BG3D[opts.bg] ?? { type: "color", a: opts.bg };
+  return opts.dark ? BG3D["studio-dark"] : BG3D.studio;
+}
+
+async function getShot(browser, device, opts) {
+  const cr = contentRect(device, opts.mode);
+  if (opts.inputFile) {
+    const buffer = readFileSync(opts.inputFile);
+    const dims = pngSize(buffer);
+    return { buffer, pxWidth: dims.width, pxHeight: dims.height, fromFile: true };
+  }
+  return capture(browser, opts.url, {
+    viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
+    dark: opts.dark, hide: opts.hide, waitMs: opts.wait,
+  });
+}
+
+async function render3dOutput(browser, opts, shots) {
+  const flat = opts.view === "flat";
+  const device0 = shots[0].device;
+  const textures = [];
+  const devices = [];
+  for (const { id, device, shot, analysis } of shots) {
+    textures.push(await renderScreenTexture(browser, device, shot, analysis, opts, device.dpr));
+    const screenTexIdx = textures.length - 1;
+    const geo = {
+      spec: { kind: device.kind },
+      ...deviceGeometry(device, { buttons: opts.buttons }),
+      texture: `/tex/${screenTexIdx}.png`,
+    };
+    // Real bezel art as the device's front face (fetched cache or
+    // --frame): the 3D front view then matches the flat composite.
+    const frameFile = findFrame(id, opts.frame);
+    if (frameFile) {
+      const frame = analyzeFrame(frameFile);
+      const s = frame.hole.width / device.pt.width;
+      textures.push(frame.buf);
+      geo.frameArt = {
+        texture: `/tex/${textures.length - 1}.png`,
+        art: { width: frame.img.width / s, height: frame.img.height / s },
+        body: {
+          x: frame.deviceBox.x / s, y: frame.deviceBox.y / s,
+          width: frame.deviceBox.width / s, height: frame.deviceBox.height / s,
+        },
+        hole: {
+          x: frame.hole.x / s, y: frame.hole.y / s,
+          width: frame.hole.width / s, height: frame.hole.height / s,
+        },
+      };
+      // Body slab silhouette = the art's own alpha contour, unshrunk:
+      // Apple's art has semi-transparent polished highlights at the
+      // corners, and every such pixel must have slab behind it or the
+      // background bleeds through as bright notches.
+      geo.outer = {
+        width: geo.frameArt.art.width,
+        height: geo.frameArt.art.height,
+        points: frame.bodyOutline.map(([px, py]) => [px / s, py / s]),
+      };
+      delete geo.plate;
+      delete geo.island;
+      delete geo.buttons;
+      delete geo.deck;
+    }
+    devices.push(geo);
+  }
+  const stage = flat
+    ? {
+        width: frameSize(device0).width + 2 * opts.padding,
+        height: frameSize(device0).height + 2 * opts.padding,
+      }
+    : opts.size;
+  const config = {
+    view: opts.view,
+    devices,
+    stage,
+    scale: flat ? device0.dpr : opts.scale,
+    bg: bg3d(opts),
+    frameTheme: opts.frameTheme,
+    float: opts.float,
+    shadow: opts.shadow,
+    rotate: {},
+  };
+  return { config, textures };
 }
 
 /**
@@ -407,11 +540,16 @@ function verifySingle({ shot, out, device, opts, analysis }) {
   const d = device;
   const cr = contentRect(d, opts.mode);
   const expectedShot = { w: Math.round(cr.width * d.dpr), h: Math.round(cr.height * d.dpr) };
-  let ok = check(
-    "capture is DPR-exact (safe-area viewport)",
-    shot.pxWidth === expectedShot.w && shot.pxHeight === expectedShot.h,
-    `${shot.pxWidth}×${shot.pxHeight} vs spec ${expectedShot.w}×${expectedShot.h}`,
-  );
+  let ok = true;
+  if (shot.fromFile) {
+    console.log(`  check: capture is DPR-exact — skipped (framing an existing file, ${shot.pxWidth}×${shot.pxHeight})`);
+  } else {
+    ok = check(
+      "capture is DPR-exact (safe-area viewport)",
+      shot.pxWidth === expectedShot.w && shot.pxHeight === expectedShot.h,
+      `${shot.pxWidth}×${shot.pxHeight} vs spec ${expectedShot.w}×${expectedShot.h}`,
+    );
+  }
 
   const size = frameSize(d);
   const expected = {
@@ -432,15 +570,28 @@ function verifySingle({ shot, out, device, opts, analysis }) {
     Math.round((opts.padding + sr.y + ptY) * d.dpr),
   ];
 
-  // Content alignment: capture center must land at the content-rect center.
+  // Content alignment: a small patch at the content-rect center must
+  // average to the same color as the capture's center patch (a patch,
+  // not one pixel: GPU texture sampling may shift by half a texel, which
+  // on high-frequency content flips single pixels).
+  const patchAvg = (img, cx, cy) => {
+    let r = 0, g = 0, b2 = 0, n = 0;
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const p = getPixel(img, cx + dx, cy + dy);
+        r += p[0]; g += p[1]; b2 += p[2]; n++;
+      }
+    }
+    return [r / n, g / n, b2 / n, 255];
+  };
   const [ccx, ccy] = abs(cr.x + cr.width / 2, cr.y + cr.height / 2);
-  const got = getPixel(outImg, ccx, ccy);
+  const got = patchAvg(outImg, ccx, ccy);
   const shotImg = decodePng(shot.buffer);
-  const want = getPixel(shotImg, Math.round(shot.pxWidth / 2), Math.round(shot.pxHeight / 2));
+  const want = patchAvg(shotImg, Math.round(shot.pxWidth / 2), Math.round(shot.pxHeight / 2));
   ok = check(
-    "frame alignment (content center pixel)",
-    colorDistance(got, want) <= 6,
-    `output rgb(${got.slice(0, 3)}) vs capture rgb(${want.slice(0, 3)})`,
+    "frame alignment (content center patch)",
+    colorDistance(got, want) <= 12,
+    `output rgb(${got.map(Math.round).slice(0, 3)}) vs capture rgb(${want.map(Math.round).slice(0, 3)})`,
   ) && ok;
 
   if (d.kind === "phone" && d.island && opts.mode !== "bare") {
@@ -543,18 +694,15 @@ async function main() {
     for (const id of opts.deviceIds) {
       const device = DEVICES[id];
       const cr = contentRect(device, opts.mode);
-      console.log(`plinth · capturing ${opts.url} as ${id} (${cr.width}×${cr.height}pt @${device.dpr}x, mode ${device.kind === "phone" || device.kind === "tablet" ? opts.mode : "n/a"})`);
-      const shot = await capture(browser, opts.url, {
-        viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
-        dark: opts.dark, hide: opts.hide, waitMs: opts.wait,
-      });
+      console.log(`plinth · ${opts.inputFile ? "framing" : "capturing"} ${opts.url} as ${id} (${cr.width}×${cr.height}pt @${device.dpr}x, mode ${device.kind === "phone" || device.kind === "tablet" ? opts.mode : "n/a"}, view ${opts.view})`);
+      const shot = await getShot(browser, device, opts);
       shots.push({ id, device, shot, analysis: analyzeCapture(shot.buffer) });
     }
 
     // Real device frame art (fetched cache or --frame override) is the
-    // primary single-device path; the procedural frame is an offline
-    // fallback only and never a showcase.
-    const frameFile = !multi ? findFrame(opts.deviceIds[0], opts.frame) : null;
+    // primary flat single-device path; the procedural frame is an
+    // offline fallback only and never a showcase.
+    const frameFile = !multi && opts.view === "flat" ? findFrame(opts.deviceIds[0], opts.frame) : null;
     if (frameFile) {
       const frame = analyzeFrame(frameFile);
       console.log(`  frame art: ${frameFile} (${frame.img.width}×${frame.img.height}, screen cutout ${frame.hole.width}×${frame.hole.height} @ ${frame.hole.x},${frame.hole.y})`);
@@ -572,22 +720,43 @@ async function main() {
       }
       return;
     }
-    if (!multi && FRAME_MANIFEST[opts.deviceIds[0]]) {
+    if (!multi && opts.view === "flat" && FRAME_MANIFEST[opts.deviceIds[0]]) {
       console.log("  note: procedural fallback frame (offline only) — fetch real device art with `node scripts/fetch-frames.mjs`");
     }
 
-    const frames = shots.map(({ device, shot, analysis }) =>
-      deviceHtmlFor(device, shot, analysis, opts));
-    const dprOut = multi ? MULTI_DPR : shots[0].device.dpr;
-    const { buffer } = await composite(browser, stageHtml(frames, opts), dprOut);
 
-    const outFile = opts.out ?? `plinth-${multi ? "multi" : opts.deviceIds[0]}.png`;
+    // Legacy 2D row: several devices side by side in the flat view.
+    if (multi && opts.view === "flat") {
+      const frames = shots.map(({ device, shot, analysis }) =>
+        deviceHtmlFor(device, shot, analysis, opts));
+      const { buffer } = await composite(browser, stageHtml(frames, opts), MULTI_DPR);
+      const outFile = opts.out ?? "plinth-multi.png";
+      mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
+      writeFileSync(outFile, buffer);
+      const dims = pngSize(buffer);
+      console.log(`  wrote ${outFile} (${dims.width}×${dims.height})`);
+      console.log(`  multi-device 2D row composited at @${MULTI_DPR}x`);
+      return;
+    }
+
+    const { config, textures } = await render3dOutput(browser, opts, shots);
+
+    if (opts.turntable) {
+      const outFile = opts.out ?? `plinth-${opts.deviceIds[0]}-${opts.view}.mp4`;
+      mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
+      const frames = await renderLoop(browser, config, textures, outFile);
+      console.log(`  wrote ${outFile} (${frames} frames, seamless loop)`);
+      return;
+    }
+
+    const buffer = await renderStill(browser, config, textures);
+    const outFile = opts.out ?? `plinth-${multi ? opts.view : opts.deviceIds[0]}.png`;
     mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
     writeFileSync(outFile, buffer);
     const dims = pngSize(buffer);
-    console.log(`  wrote ${outFile} (${dims.width}×${dims.height})`);
+    console.log(`  wrote ${outFile} (${dims.width}×${dims.height}, ${opts.view} view)`);
 
-    if (!multi) {
+    if (opts.view === "flat" && !multi) {
       const ok = verifySingle({
         shot: shots[0].shot, out: buffer, device: shots[0].device, opts,
         analysis: shots[0].analysis,
@@ -596,8 +765,6 @@ async function main() {
         console.error("plinth: verification failed — see checks above");
         process.exit(EXIT_CHECK);
       }
-    } else {
-      console.log(`  multi-device layout composited at @${MULTI_DPR}x (single-device runs are 1:1 native)`);
     }
   });
 }

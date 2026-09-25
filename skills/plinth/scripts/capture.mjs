@@ -19,7 +19,9 @@ try {
 }
 
 function launchOptions() {
-  const args = [];
+  // SwiftShader keeps WebGL available (and deterministic) on machines
+  // without a GPU — required by the 3D renderer.
+  const args = ["--enable-unsafe-swiftshader"];
   // Chrome refuses to sandbox as root (CI containers, cloud VMs).
   if (typeof process.getuid === "function" && process.getuid() === 0) args.push("--no-sandbox");
   const executablePath = process.env.PLINTH_BROWSER || undefined;

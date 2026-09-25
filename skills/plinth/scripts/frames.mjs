@@ -124,6 +124,32 @@ export function analyzeFrame(file) {
   if (maxX < 0) throw new Error(`no screen cutout found in frame: ${file}`);
   const hole = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
 
+  // Device body bounds (opaque art) — the 3D body silhouette.
+  let bMinX = Infinity, bMinY = Infinity, bMaxX = -1, bMaxY = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x += 2) {
+      if (alphaAt(x, y) > 250) {
+        if (x < bMinX) bMinX = x;
+        if (x > bMaxX) bMaxX = x;
+        if (y < bMinY) bMinY = y;
+        if (y > bMaxY) bMaxY = y;
+      }
+    }
+  }
+  const bodyBox = { x: bMinX, y: bMinY, width: bMaxX - bMinX + 1, height: bMaxY - bMinY + 1 };
+
+  // True device edges via a cross-scan through the cutout center: the
+  // alpha bbox above includes soft shadows and protruding buttons, which
+  // would inflate the 3D silhouette.
+  const cy = Math.round(hole.y + hole.height / 2);
+  const cx = Math.round(hole.x + hole.width / 2);
+  let left = 0, right = W - 1, top = 0, bottom = H - 1;
+  while (left < W && alphaAt(left, cy) <= 250) left++;
+  while (right > 0 && alphaAt(right, cy) <= 250) right--;
+  while (top < H && alphaAt(cx, top) <= 250) top++;
+  while (bottom > 0 && alphaAt(cx, bottom) <= 250) bottom--;
+  const deviceBox = { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
+
   // Mask cropped to the hole: content shows where the art is transparent
   // (and not exterior); partial alpha at the cutout edge inverts so the
   // screenshot anti-aliases into the art's own corner curve.
@@ -138,5 +164,27 @@ export function analyzeFrame(file) {
       mask[i] = 255; mask[i + 1] = 255; mask[i + 2] = 255; mask[i + 3] = show;
     }
   }
-  return { file, buf, img, hole, maskPng: encodePng(hole.width, hole.height, mask) };
+  // Outer silhouette of the opaque art (device incl. buttons), traced as
+  // a row-scan polygon: left edge top→bottom, right edge bottom→top.
+  // This is the 3D slab's outline, so it hugs the art's own corner
+  // curves exactly (no wedges, no gaps).
+  const step = 2;
+  const leftEdge = [];
+  const rightEdge = [];
+  for (let y = bMinY; y <= bMaxY; y += step) {
+    let l = -1, r = -1;
+    for (let x = bMinX; x <= bMaxX; x++) {
+      if (alphaAt(x, y) > 200) { l = x; break; }
+    }
+    for (let x = bMaxX; x >= bMinX; x--) {
+      if (alphaAt(x, y) > 200) { r = x; break; }
+    }
+    if (l >= 0 && r > l) {
+      leftEdge.push([l, y]);
+      rightEdge.push([r, y]);
+    }
+  }
+  const bodyOutline = [...rightEdge, ...leftEdge.reverse()];
+
+  return { file, buf, img, hole, bodyBox, deviceBox, bodyOutline, maskPng: encodePng(hole.width, hole.height, mask) };
 }

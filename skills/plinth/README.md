@@ -1,31 +1,52 @@
 # Plinth
 
-Device-framed, DPR-correct screenshots of a running app or URL — the
-Figma-mockup-plugin workflow (device frames around app shots) without
-leaving the terminal, driven by your coding agent, with spec-accurate
-device chrome.
+Device mockups of a running app or URL, rendered as real 3D — the
+Figma-mockup-plugin workflow without leaving the terminal, driven by
+your coding agent, with spec-accurate device geometry.
 
-Plinth captures with Playwright at the device's **safe-area viewport**
-(page content never sits under the Dynamic Island, status bar, or home
-indicator), draws faithful chrome, and composites at native DPR. Frames
-and chrome are generated CSS/SVG — no copyrighted vendor artwork.
+Each device is built procedurally in three.js from the verified spec
+table (extruded continuous-corner body with bevels, titanium edge
+material, glass, the island as geometry, optional side buttons — no
+vendor 3D assets). The screen is a plane textured with the 2D
+compositor's output (page capture + status bar + Safari chrome + home
+indicator at native DPR) — that compositor stays the single source of
+screen truth. The flat view is the same scene through an orthographic
+front camera and is pixel-exact to spec; floating views use a
+perspective camera with presets.
 
 Renders use **real, official device frame art** (Apple Product Bezels),
 fetched from Apple's CDN with a license gate — see below for why no
-framed example images are committed to this repo.
+framed example images are committed to this repo. In 3D views the same
+art is the device's front face, so the front view matches the flat
+render exactly.
 
 ## Quick start
 
 ```bash
-cd skills/plinth && npm install       # playwright-core + @fontsource/inter
+cd skills/plinth && npm install       # playwright-core + three + @fontsource/inter
 node scripts/fetch-frames.mjs         # official Apple bezel art (license-gated, cached)
-node scripts/plinth.mjs https://x.ai --device iphone-16-pro
-node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode safari
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro                            # flat, real frame, pixel-exact
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode app --view hero     # floating 3D
+node scripts/plinth.mjs shot.png --device iphone-16-pro --view tilt-left               # frame an existing screenshot
 ```
+
+## Views
+
+`--view flat` (default) renders the orthographic front view —
+dimensions, island, indicator and alignment verified on every run.
+Floating views: `hero` (three-quarter), `tilt-left` / `tilt-right`,
+`top-down`, `fan` (three devices; one device is replicated), `combo`
+(largest device centered, phone front-right). Options: `--float <pt>`,
+`--transparent`, `--scale 1|2|3`, `--size WxH`, and `--turntable` for a
+seamless float/rotate loop (mp4/gif via ffmpeg). Environment light is a
+procedural room (PMREM); the contact shadow is a soft blob — both
+deterministic, verified by a determinism test.
 
 Requires Node ≥ 18 and an installed Chrome/Chromium (playwright-core
 drives it via the `chrome` channel — no browser download; set
-`PLINTH_BROWSER=/path/to/chrome` to override). ffmpeg only for `--scroll`.
+`PLINTH_BROWSER=/path/to/chrome` to override; WebGL runs on SwiftShader
+where no GPU exists). Dependencies: `playwright-core`, `three`,
+`@fontsource/inter`. ffmpeg only for `--scroll`/`--turntable`.
 
 ## Real device frames (fetched, never committed)
 
@@ -165,10 +186,12 @@ above; no authenticated-session capture yet.
 cd skills/plinth && npm install && npm test
 ```
 
-14 tests, including fidelity assertions against a fixture with edge
-markers: no page pixels under the island/status bar/home indicator in
-standalone mode, exact content-origin at the safe-area top, island
-blackness at spec coordinates, home-indicator presence/contrast, safari
-pill presence, macOS menu bar + notch, browser chrome, deterministic
-multi-device dims, fractional DPR, scroll mp4. Tests self-skip without
-Chrome.
+17 tests. The flat-view fidelity assertions run against the 3D
+orthographic render (a fixture with edge markers proves no page pixels
+under the island/status bar/home indicator, exact content origin,
+island blackness at spec coordinates, home-indicator contrast, safari
+pill, macOS menu bar + notch, browser chrome, fractional DPR, scroll
+mp4). 3D-specific tests: transparent output keeps true alpha (corner
+alpha 0, body alpha 255) at the requested canvas size, and rendering is
+deterministic — the same input twice differs by a mean pixel distance
+under 0.5. Tests self-skip without Chrome.

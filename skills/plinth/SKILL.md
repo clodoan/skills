@@ -21,14 +21,19 @@ is pixel-sharp) and composites it into a clean generated device frame.
    playwright-core; it drives the system Chrome — no browser download).
    The target app must be reachable by URL (local dev server or public).
 
-2. Capture:
+2. Capture (a URL, or a .png path to frame an existing screenshot):
 
    ```bash
    node <path-to-skill>/scripts/plinth.mjs http://localhost:3000 --device iphone-16-pro
-   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --mode safari
-   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --devices iphone-16-pro,macbook-14 --dark
-   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --scroll --out demo.mp4
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --mode app --view hero
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --devices iphone-16-pro,macbook-14 --view combo --dark
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --view hero --turntable --out loop.mp4
    ```
+
+   Views: `flat` (default, orthographic, pixel-exact — use for docs and
+   PRs) | `hero` | `tilt-left` | `tilt-right` | `top-down` | `fan` |
+   `combo` (floating 3D — use for READMEs and social). 3D flags:
+   `--float`, `--transparent`, `--scale`, `--size WxH`, `--turntable`.
 
    Devices: `iphone-16-pro`, `iphone-16`, `iphone-15-pro`, `pixel-8`,
    `ipad-pro-11`, `macbook-14`, `browser`. Phone modes: `--mode
