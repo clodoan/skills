@@ -6,10 +6,9 @@
  * Screen Studio, .gif, ...) and writes an output folder with an index.md
  * the agent reads first: metadata, motion-trimmed and motion-cropped
  * contact sheets stamped with frame numbers and milliseconds, difference
- * sheets, and a per-frame motion table (CSV + chart) estimated from
- * pixel differencing.
+ * sheets, and a per-frame motion table estimated from pixel differencing.
  *
- * Requires ffmpeg + ffprobe on PATH. No other dependencies. Node >= 18.
+ * Requires ffmpeg + ffprobe >= 4.4 on PATH. No other dependencies. Node >= 18.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -34,14 +33,12 @@ const UPSCALE_TARGET = 320; // upscale crops until min dimension reaches this
 const MAX_UPSCALE = 4;
 const SHEET_MAX_PX = 4096; // sheets stay under image-reader limits (8000px) on both axes
 const MAX_FPS = 120;
-// Everything scrub writes; only these are removed when reusing an output dir.
 const NORMALIZED = path.join("work", "normalized.mp4");
+// Everything scrub writes (motion-curve.svg: older versions); only these
+// are removed when reusing an output dir.
 const SCRUB_OUTPUTS = ["index.md", "overview.png", "motion.csv", "motion-curve.svg", "sheets", "work"];
 
 class UsageError extends Error {}
-
-// Intermediate files created during a run, removed unless --keep-work.
-const workFiles = [];
 
 function usage() {
   return `Usage: scrub <video> [options]
@@ -60,14 +57,13 @@ Options:
   --no-crop           Analyze the full frame, skip motion cropping
   --min-px <n>        Changed pixels a frame needs to count as motion (default 20)
   --threshold <n>     Luma delta for faint change such as fades (default 8, max 24)
-  --keep-work         Keep intermediate files in work/
   -h, --help          Show this help`;
 }
 
 function parseArgs(argv) {
   const opts = {
     input: null, out: null, fps: null, grid: 4,
-    maxFrames: 96, pad: 24, crop: true, keepWork: false, minPx: 20, threshold: 8,
+    maxFrames: 96, pad: 24, crop: true, minPx: 20, threshold: 8,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -93,7 +89,6 @@ function parseArgs(argv) {
         if (opts.threshold > STRONG_THRESHOLD) throw new UsageError(`--threshold must be at most ${STRONG_THRESHOLD}`);
         break;
       case "--no-crop": opts.crop = false; break;
-      case "--keep-work": opts.keepWork = true; break;
       case "-h":
       case "--help":
         console.log(usage());
@@ -135,7 +130,7 @@ function checkTools() {
   for (const tool of ["ffmpeg", "ffprobe"]) {
     const res = spawnSync(tool, ["-version"], { stdio: "ignore" });
     if (res.error || res.status !== 0) {
-      throw new UsageError(`${tool} not found on PATH — scrub needs ffmpeg (e.g. \`brew install ffmpeg\` or \`apt-get install ffmpeg\`)`);
+      throw new UsageError(`${tool} not found on PATH — scrub needs ffmpeg (e.g. \`brew install ffmpeg-full\` or \`apt-get install ffmpeg\`)`);
     }
   }
 }
@@ -240,7 +235,6 @@ function normalize(input, fps, outDir) {
 function motionPass(outDir, threshold) {
   const strongFile = path.join("work", "motion-strong.txt");
   const faintFile = path.join("work", "motion-faint.txt");
-  workFiles.push(path.join(outDir, strongFile), path.join(outDir, faintFile));
   const branch = (label, t, file) =>
     `[${label}]lut=y=if(gt(val\\,${t})\\,255\\,0),bbox=min_val=1,signalstats,metadata=mode=print:file=${file}[${label}o]`;
   const graph = `[0:v]format=gray,tblend=all_mode=difference,split[s][f];` +
@@ -250,7 +244,9 @@ function motionPass(outDir, threshold) {
     "-map", "[so]", "-f", "null", "-", "-map", "[fo]", "-f", "null", "-",
   ], outDir);
   const faint = new Map(parseMetadata(path.join(outDir, faintFile)).map((r) => [r.k, r]));
-  return parseMetadata(path.join(outDir, strongFile)).map((r) => ({ ...r, faint: faint.get(r.k) }));
+  const rows = parseMetadata(path.join(outDir, strongFile)).map((r) => ({ ...r, faint: faint.get(r.k) }));
+  for (const f of [strongFile, faintFile]) rmSync(path.join(outDir, f));
+  return rows;
 }
 
 function parseMetadata(file) {
@@ -462,47 +458,6 @@ function writeCsv(outDir, table) {
   writeFileSync(path.join(outDir, "motion.csv"), lines.join("\n") + "\n");
 }
 
-function writeChart(outDir, table, motion) {
-  const rows = table.filter((r) => r.frame >= motion.start && r.frame <= motion.end);
-  const withBox = rows.filter((r) => r.bbox);
-  if (withBox.length < 2) return false;
-
-  const W = 720, H = 280, padL = 46, padR = 12, padT = 18, padB = 34;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
-  const msMin = rows[0].ms, msMax = rows.at(-1).ms || 1;
-  const px = (ms) => padL + ((ms - msMin) / Math.max(1, msMax - msMin)) * plotW;
-
-  const series = [
-    { name: "cx (px)", color: "#4da3ff", vals: withBox.map((r) => [r.ms, (r.bbox.x1 + r.bbox.x2) / 2]) },
-    { name: "cy (px)", color: "#ff6b6b", vals: withBox.map((r) => [r.ms, (r.bbox.y1 + r.bbox.y2) / 2]) },
-    { name: "changed px", color: "#9aa0a6", vals: rows.map((r) => [r.ms, r.changedPx]) },
-  ];
-  const polylines = series.map((s) => {
-    const ys = s.vals.map((v) => v[1]);
-    const yMin = Math.min(...ys), yMax = Math.max(...ys);
-    const py = (v) => padT + (1 - (v - yMin) / Math.max(1, yMax - yMin)) * plotH;
-    const points = s.vals.map(([ms, v]) => `${px(ms).toFixed(1)},${py(v).toFixed(1)}`).join(" ");
-    return { ...s, points, yMin, yMax };
-  });
-
-  const legend = polylines.map((s, i) =>
-    `<text x="${padL + i * 170}" y="${H - 10}" fill="${s.color}" font-size="12">` +
-    `${s.name}  [${Math.round(s.yMin)}…${Math.round(s.yMax)}]</text>`).join("\n  ");
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="system-ui, sans-serif">
-  <rect width="${W}" height="${H}" fill="#16181c"/>
-  <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="none" stroke="#3c4043"/>
-  <text x="${padL}" y="12" fill="#e8eaed" font-size="12">motion curves (each series normalized to its own min…max)</text>
-  <text x="${padL}" y="${padT + plotH + 14}" fill="#9aa0a6" font-size="11">${msMin}ms</text>
-  <text x="${W - padR}" y="${padT + plotH + 14}" fill="#9aa0a6" font-size="11" text-anchor="end">${msMax}ms</text>
-  ${polylines.map((s) => `<polyline points="${s.points}" fill="none" stroke="${s.color}" stroke-width="1.5"/>`).join("\n  ")}
-  ${legend}
-</svg>
-`;
-  writeFileSync(path.join(outDir, "motion-curve.svg"), svg);
-  return true;
-}
-
 function markdownTable(table, motion, maxRows = 36) {
   const rows = table.filter((r) => r.frame >= motion.start && r.frame <= motion.end);
   const stride = Math.max(1, Math.ceil(rows.length / maxRows));
@@ -518,7 +473,7 @@ function markdownTable(table, motion, maxRows = 36) {
       `${b ? `${Math.round((b.x1 + b.x2) / 2)},${Math.round((b.y1 + b.y2) / 2)}` : "—"} | ${r.changedPx} | ${r.faintPx} |`,
     );
   }
-  if (stride > 1) lines.push("", `(every ${stride}th row shown — full data in motion.csv)`);
+  if (stride > 1) lines.push("", `(one row in ${stride} shown — full data in motion.csv)`);
   return lines.join("\n");
 }
 
@@ -528,7 +483,7 @@ function peakChange(active) {
 }
 
 function writeIndex(ctx) {
-  const { outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps } = ctx;
+  const { outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, sheetsCount, sheets, stamps } = ctx;
   const ms = (f) => Math.round((f * 1000) / fps);
   const retinaHint = Math.min(meta.width, meta.height) >= 1400
     ? "large enough to be a 2x (Retina) capture, or a 1x large monitor; confirm against a known element size before halving px to pt"
@@ -538,7 +493,6 @@ function writeIndex(ctx) {
   const noMotion = motion.active.length === 0;
   const md = `# scrub · ${path.basename(opts.input)}
 
-Read this file top to bottom, then open the contact sheets it lists.
 All frame numbers and milliseconds refer to the normalized clip
 (\`work/normalized.mp4\`, constant ${fps} fps): frame N = N·1000/${fps} ms, rounded.
 
@@ -560,29 +514,16 @@ ${noMotion ? "**No motion detected** above the noise floor. The clip appears sta
 - \`overview.png\` — ${Math.min(opts.grid * opts.grid, totalFrames)} frames sampled evenly across the whole clip, uncropped
 ${noMotion ? "" : `- \`sheets/sheet-*.png\` — dense ${opts.grid}×${opts.grid} contact sheets of the active window${crop ? " (cropped to motion)" : ""}${stamps ? ", each cell stamped \`f<frame> <ms>ms\`" : ""}
 - \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×), cell for cell with the sheets; bright pixels = what moved INTO that frame
-`}- \`motion.csv\` — per-frame motion bounding box and changed-pixel count
-${hasChart ? "- `motion-curve.svg` — plotted x/y center and changed-pixel curves\n" : ""}- \`work/normalized.mp4\` — the constant-rate clip all frame numbers refer to (use it for any further ffmpeg extraction)
+`}- \`motion.csv\` — per-frame motion bounding box, changed_px, and faint_px
+- \`work/normalized.mp4\` — the constant-rate clip all frame numbers refer to (use it for any further ffmpeg extraction)
 ${stamps ? "" : `\n**Cells are unstamped** (this ffmpeg cannot draw text). Frames per sheet, row by row:\n\n${sheetFrameList(sheets, opts.grid, ms)}\n`}
 ## Per-frame motion table
 
-Estimated from pixel differencing between consecutive frames — this is
-**not** the real animation values. The bbox is the region that changed
-between a frame and its predecessor (it spans both the old and new
-position of a moving element). Sub-pixel motion, opacity fades, and
-blurs register as changed pixels without a clean box.
+Estimated from pixel differencing, **not** the real animation values:
+each bbox spans the old and new position of whatever changed since the
+previous frame.
 
 ${noMotion ? "(no rows above the noise floor)" : markdownTable(motion.table, motion)}
-
-## How to read the results
-
-1. Skim \`overview.png\` for the overall arc, then the dense sheets for
-   the frames that matter.
-2. Use the table/CSV to find where movement starts, peaks, overshoots,
-   and settles; convert frames to ms via frame·1000/${fps}.
-3. Diff sheets show *what* moved; near-black diff cells are hold frames
-   (potential jank if they sit mid-animation).
-4. Report findings in frame/ms terms, e.g. "frames 12–18 overshoot by
-   ~6px; reads as ease-out, spec says spring".
 `;
   writeFileSync(path.join(outDir, "index.md"), md);
 }
@@ -622,13 +563,8 @@ function main() {
   const sheets = renderSheets({ outDir, motion, crop, denseFrames: dense.frames, grid: opts.grid, meta, totalFrames, stamps, fps });
 
   writeCsv(outDir, motion.table);
-  const hasChart = writeChart(outDir, motion.table, motion);
   const sheetsCount = Math.ceil(dense.frames.length / (opts.grid * opts.grid));
-  writeIndex({ outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps });
-
-  if (!opts.keepWork) {
-    for (const f of workFiles) rmSync(f, { force: true });
-  }
+  writeIndex({ outDir, opts, meta, fps, fpsCapped, totalFrames, motion, crop, dense, sheetsCount, sheets, stamps });
 
   console.log(`  done → ${path.join(outDir, "index.md")}`);
 }

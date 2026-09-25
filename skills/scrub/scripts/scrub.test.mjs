@@ -243,15 +243,14 @@ test("crops to the motion band and upscales small crops", opts, () => {
   assert.match(index, /shown at \dx on sheets/);
 });
 
-test("writes stamped contact sheets, diff sheets, chart, and index sections", opts, () => {
+test("writes contact sheets, diff sheets, and index sections", opts, () => {
   const outDir = scrubbed("eased.mp4");
   assert.ok(existsSync(path.join(outDir, "overview.png")));
   assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
   assert.ok(existsSync(path.join(outDir, "sheets/diff-01.png")));
-  assert.ok(existsSync(path.join(outDir, "motion-curve.svg")));
-  assert.ok(existsSync(path.join(outDir, "work/normalized.mp4")));
+  assert.deepEqual(readdirSync(path.join(outDir, "work")), ["normalized.mp4"]);
   const index = readIndex(outDir);
-  for (const section of ["## Metadata", "## Motion summary", "## Files", "## Per-frame motion table", "## How to read the results"]) {
+  for (const section of ["## Metadata", "## Motion summary", "## Files", "## Per-frame motion table"]) {
     assert.ok(index.includes(section), `missing ${section}`);
   }
   assert.match(index, /\| frame \| ms \|/);
