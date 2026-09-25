@@ -13,11 +13,12 @@
  * by decoding real pixels. Device geometry is cited in devices.mjs.
  */
 
-import { spawn } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { writeFileSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import {
   DEVICES, BACKGROUNDS, deviceList, frameSize, screenRect, contentRect,
@@ -31,11 +32,12 @@ const require = createRequire(import.meta.url);
 const EXIT_OK = 0;
 const EXIT_CHECK = 1;
 const EXIT_USAGE = 2;
+const EXIT_RUNTIME = 3;
 
 const GAP = 56; // pt between frames in multi-device layouts
 const MULTI_DPR = 2;
 
-class UsageError extends Error {}
+export class UsageError extends Error {}
 
 function usage() {
   return `Usage: plinth <url> [options]
@@ -48,29 +50,55 @@ Options:
   --devices <a,b,c>   Multi-device row layout (composited at @2x)
   --mode <m>          Phone/tablet presentation: standalone (app-style,
                       status bar + home indicator, default) | safari
-                      (mobile Safari with compact bottom bar) | bare
-                      (full-bleed, content under everything)
+                      (iPhone only: mobile Safari with compact bottom
+                      bar) | bare (phones/tablets: full-bleed, content
+                      under everything)
   --status <s>        Status bar content: auto (from page luminance,
                       default) | light | dark
   --buttons           Draw side buttons on phone frames
-  --out <file>        Output PNG (default: plinth-<device>.png)
-  --bg <value>        Background: ${Object.keys(BACKGROUNDS).join(" | ")} or any CSS value
+  --out <file>        Output .png (default: plinth-<device>.png, or
+                      plinth-multi.png); with --scroll .mp4 or .gif
+                      (default: plinth-<device>-scroll.mp4)
+  --bg <value>        Background: ${Object.keys(BACKGROUNDS).join(" | ")} or a CSS
+                      color/gradient
   --padding <px>      Padding around the frame (default 48)
   --no-shadow         Disable the drop shadow
   --dark              Dark color scheme for the page + dark background
   --frame <theme>     Frame theme: dark | light (default dark)
   --hide <sel,sel>    CSS selectors to hide before capture (cookie banners)
   --wait <ms>         Extra settle time after load (default 800)
-  --scroll            Scrolled capture of the full page → mp4 (or .gif --out)
+  --scroll            Scrolled capture of the full page → mp4/gif (ffmpeg)
   -h, --help          Show this help
 
 Devices:
 ${deviceList()}
 
-Exit codes: 0 ok, 1 a verification check failed, 2 usage error.`;
+Exit codes: 0 ok, 1 a verification check failed, 2 usage error,
+3 runtime error (navigation, browser, ffmpeg).`;
 }
 
-function parseArgs(argv) {
+/** Scheme-less URLs: http for loopback dev servers, https otherwise. */
+export function normalizeUrl(raw) {
+  let url = raw;
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(url)) {
+    const host = url.split(/[/?#]/)[0].replace(/:\d+$/, "").toLowerCase();
+    const loopback = ["localhost", "0.0.0.0", "[::1]"].includes(host) || /^127(\.\d{1,3}){3}$/.test(host);
+    url = `${loopback ? "http" : "https"}://${url}`;
+  }
+  try {
+    return new URL(url).href;
+  } catch {
+    throw new UsageError(`not a valid URL: ${raw}`);
+  }
+}
+
+function nonNegative(flag, value) {
+  const n = Number(value);
+  if (value.trim() === "" || !Number.isFinite(n) || n < 0) throw new UsageError(`${flag} must be a non-negative number`);
+  return n;
+}
+
+export function parseArgs(argv) {
   const opts = {
     url: null, device: "iphone-16-pro", devices: null, out: null,
     mode: "standalone", status: "auto", buttons: false,
@@ -92,12 +120,12 @@ function parseArgs(argv) {
       case "--buttons": opts.buttons = true; break;
       case "--out": opts.out = next(); break;
       case "--bg": opts.bg = next(); break;
-      case "--padding": opts.padding = Number(next()); break;
+      case "--padding": opts.padding = nonNegative(arg, next()); break;
       case "--no-shadow": opts.shadow = false; break;
       case "--dark": opts.dark = true; break;
       case "--frame": opts.frame = next(); break;
       case "--hide": opts.hide = next().split(",").map((s) => s.trim()).filter(Boolean); break;
-      case "--wait": opts.wait = Number(next()); break;
+      case "--wait": opts.wait = nonNegative(arg, next()); break;
       case "--scroll": opts.scroll = true; break;
       case "-h":
       case "--help":
@@ -111,15 +139,26 @@ function parseArgs(argv) {
     }
   }
   if (!opts.url) throw new UsageError("missing URL");
-  if (!/^[a-z]+:\/\//.test(opts.url)) opts.url = `https://${opts.url}`;
+  opts.url = normalizeUrl(opts.url);
   const ids = opts.devices ?? [opts.device];
-  for (const id of ids) {
-    if (!DEVICES[id]) throw new UsageError(`unknown device "${id}"\n\nDevices:\n${deviceList()}`);
-  }
-  opts.deviceIds = ids;
   if (!["standalone", "safari", "bare"].includes(opts.mode)) {
     throw new UsageError("--mode must be standalone, safari, or bare");
   }
+  for (const id of ids) {
+    const d = DEVICES[id];
+    if (!d) throw new UsageError(`unknown device "${id}"\n\nDevices:\n${deviceList()}`);
+    if (opts.mode === "safari" && !(d.kind === "phone" && d.os === "ios")) {
+      throw new UsageError(`--mode safari is iPhone-only (not ${id})`);
+    }
+    if (opts.mode === "bare" && d.kind !== "phone" && d.kind !== "tablet") {
+      throw new UsageError(`--mode bare applies to phones and tablets (not ${id})`);
+    }
+  }
+  opts.deviceIds = ids;
+  if (opts.scroll && ids.length > 1) throw new UsageError("--scroll works with a single --device");
+  const ext = opts.out === null ? null : path.extname(opts.out).toLowerCase();
+  if (opts.scroll && ext !== null && ext !== ".mp4" && ext !== ".gif") throw new UsageError("--scroll output must be .mp4 or .gif");
+  if (!opts.scroll && ext !== null && ext !== ".png") throw new UsageError("output must be .png (use --scroll for .mp4/.gif)");
   if (!["auto", "light", "dark"].includes(opts.status)) {
     throw new UsageError("--status must be auto, light, or dark");
   }
@@ -387,14 +426,19 @@ async function renderScroll(browser, opts, device, outFile) {
   console.log(`  wrote ${outFile} (${steps + 1} frames, ${seconds.toFixed(1)}s scroll)`);
 }
 
+function requireFfmpeg() {
+  const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+  if (probe.error || probe.status !== 0) throw new Error("--scroll needs ffmpeg on PATH (brew/apt install ffmpeg)");
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.scroll) requireFfmpeg();
   const multi = opts.deviceIds.length > 1;
 
   await withBrowser(async (browser) => {
     await validateBackground(browser, opts);
     if (opts.scroll) {
-      if (multi) throw new UsageError("--scroll works with a single --device");
       const device = DEVICES[opts.deviceIds[0]];
       const outFile = opts.out ?? `plinth-${opts.deviceIds[0]}-scroll.mp4`;
       mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
@@ -440,15 +484,19 @@ async function main() {
   });
 }
 
-try {
-  await main();
-} catch (err) {
-  if (err instanceof UsageError) {
-    console.error(`plinth: ${err.message}`);
-    console.error("");
-    console.error(usage());
-    process.exit(EXIT_USAGE);
+const isMain = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  try {
+    await main();
+  } catch (err) {
+    if (err instanceof UsageError) {
+      console.error(`plinth: ${err.message}`);
+      console.error("");
+      console.error(usage());
+      process.exit(EXIT_USAGE);
+    }
+    // Playwright appends a multi-line call log; the first line says it.
+    console.error(`plinth: ${String(err?.message ?? err).split("\n")[0]}`);
+    process.exit(EXIT_RUNTIME);
   }
-  console.error(`plinth: ${err?.message ?? err}`);
-  process.exit(EXIT_USAGE);
 }

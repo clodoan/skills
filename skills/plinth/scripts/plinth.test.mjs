@@ -430,3 +430,49 @@ test("--bg accepts presets and CSS colors, rejects unknown names and markup", op
   const markup = runPlinth([baseUrl, "--bg", "red;}</style><h1>x</h1><style>", "--out", path.join(dir, "bg-inj.png")]);
   assert.equal(markup.code, 2, markup.out);
 });
+
+test("usage errors exit 2 before any capture", async () => {
+  const cases = [
+    ["--padding", "abc"], ["--padding", "-10"], ["--wait", "soon"],
+    ["--device", "pixel-8", "--mode", "safari"], ["--device", "ipad-pro-11", "--mode", "safari"],
+    ["--device", "macbook-14", "--mode", "bare"],
+    ["--out", "shot.jpg"], ["--scroll", "--out", "demo.png"], ["--scroll", "--out", "demo.webm"],
+    ["--scroll", "--devices", "iphone-16-pro,pixel-8"],
+  ];
+  for (const args of cases) {
+    const res = runPlinth([baseUrl, ...args]);
+    assert.equal(res.code, 2, `${args.join(" ")} → ${res.out}`);
+    assert.doesNotMatch(res.out, /capturing/, `${args.join(" ")} started a capture`);
+  }
+});
+
+test("scheme-less URLs use http for loopback hosts, https otherwise", async () => {
+  const { normalizeUrl } = await import("./plinth.mjs");
+  assert.equal(normalizeUrl("localhost:3000"), "http://localhost:3000/");
+  assert.equal(normalizeUrl("127.0.0.1:8080/app"), "http://127.0.0.1:8080/app");
+  assert.equal(normalizeUrl("[::1]:5173"), "http://[::1]:5173/");
+  assert.equal(normalizeUrl("0.0.0.0:4000"), "http://0.0.0.0:4000/");
+  assert.equal(normalizeUrl("example.com/x"), "https://example.com/x");
+  assert.equal(normalizeUrl("HTTP://Example.com"), "http://example.com/");
+});
+
+test("a scheme-less localhost URL captures over http", opts, () => {
+  const res = runPlinth([`localhost:${new URL(baseUrl).port}`, "--device", "browser", "--out", path.join(dir, "schemeless.png")]);
+  assert.equal(res.code, 0, res.out);
+});
+
+test("runtime failures exit 3 with a one-line message", opts, () => {
+  const nav = runPlinth(["http://127.0.0.1:1", "--out", path.join(dir, "nav.png")]);
+  assert.equal(nav.code, 3, nav.out);
+  assert.match(nav.out, /plinth: page\.goto: net::ERR_/);
+  assert.doesNotMatch(nav.out, /Call log/);
+
+  const browser = runPlinth([baseUrl, "--out", path.join(dir, "nobrowser.png")], { ...process.env, PLINTH_BROWSER: "/nonexistent/chrome" });
+  assert.equal(browser.code, 3, browser.out);
+  assert.match(browser.out, /could not launch Chrome/);
+
+  const noFfmpeg = runPlinth([baseUrl, "--scroll", "--out", path.join(dir, "noff.mp4")], { ...process.env, PATH: "/nonexistent" });
+  assert.equal(noFfmpeg.code, 3, noFfmpeg.out);
+  assert.match(noFfmpeg.out, /needs ffmpeg/);
+  assert.doesNotMatch(noFfmpeg.out, /node:events|at .*\(/);
+});
