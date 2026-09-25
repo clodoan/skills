@@ -701,3 +701,18 @@ test("--thumbs without plinth installed is a usage error naming RAMBLE_PLINTH", 
   assert.equal(res.status, 2);
   assert.match(res.stderr, /RAMBLE_PLINTH/);
 });
+
+test("docs match the CLI: default output dir and every flag", () => {
+  const skill = readFileSync(new URL("../SKILL.md", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" }).stdout;
+  assert.match(help, /default: ramble-output\)/);
+  for (const doc of [skill, readme]) assert.ok(doc.includes("ramble-output/flow.md") && !doc.includes("map-output"));
+  const root = makeApp("defaultout", { "package.json": "{}", "app/page.tsx": "x" });
+  const res = spawnSync(process.execPath, [CLI, root], { encoding: "utf8", cwd: root });
+  assert.equal(res.status, 0);
+  assert.ok(existsSync(path.join(root, "ramble-output", "flow.md")));
+  for (const flag of help.match(/--[a-z-]+/g)) {
+    if (flag !== "--help") assert.ok(readme.includes(`\`${flag}`), `README lacks ${flag}`);
+  }
+});

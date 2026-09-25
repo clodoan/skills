@@ -36,23 +36,25 @@ function usage() {
   return `Usage: ramble <dir> [options]
 
 Walks the router(s) in <dir> and writes a Mermaid flowchart of real
-screens and transitions, plus a report of anything it could not
-resolve.
+screens and transitions, plus a report of every navigation it did not
+draw.
 
 Options:
-  --out <dir>         Output directory (default: ramble-output)
-  --include-shared    Add edges found in shared (non-route) files,
-                      attributed to one [shared UI] node
-  --max-label <n>     Truncate edge labels (default 24 chars)
-  --thumbs            Also render screen thumbnails via the plinth skill
+  --out <dir>         Output directory, relative to the current
+                      directory (default: ramble-output)
+  --include-shared    Draw links from non-route files (layouts, navbars)
+                      from one "shared" node
+  --max-label <n>     Truncate next.config edge labels (default 24)
+  --thumbs            Also screenshot static routes via the plinth skill
+                      (RAMBLE_PLINTH overrides its path)
   --base-url <url>    Running app URL for --thumbs (required with it)
-  --thumb-cap <n>     Max thumbnails (default 12, static routes only)
+  --thumb-cap <n>     Max screenshots (default 12)
   -h, --help          Show this help
 
 Outputs: flow.md (diagram + report), flow.mmd (raw Mermaid), and with
---thumbs a flow-visual.md gallery + thumbs/*.png.
+--thumbs flow-visual.md + thumbs/r<i>-<slug>.png.
 
-Exit codes: 0 ok, 2 usage error.`;
+Exit codes: 0 ok, 1 unexpected error, 2 usage error.`;
 }
 
 function positiveInt(flag, value) {
@@ -265,7 +267,7 @@ function nearestProject(file, root) {
   return root;
 }
 
-function detectRoots(root) {
+function detectRoots(root, files) {
   const roots = [];
   for (const dir of walkDirs(root)) {
     const base = path.basename(dir);
@@ -279,7 +281,7 @@ function detectRoots(root) {
     if (base === "app" && hasPageFileBelow(dir)) roots.push({ kind: "next-app", dir, project });
     if (base === "pages" && dependsOnNext(project)) roots.push({ kind: "next-pages", dir, project });
   }
-  const rrFiles = [...walkFiles(root)].filter((file) => RR_DEFINES_ROUTES.test(readText(file)));
+  const rrFiles = files.filter((file) => RR_DEFINES_ROUTES.test(readText(file)));
   if (rrFiles.length) roots.push({ kind: "react-router", files: rrFiles });
   return roots;
 }
@@ -959,7 +961,8 @@ function main() {
   const opts = parseArgs(process.argv.slice(2));
   const rootDir = path.resolve(opts.root);
 
-  const roots = detectRoots(rootDir);
+  const files = [...walkFiles(rootDir)];
+  const roots = detectRoots(rootDir, files);
   if (roots.length === 0) {
     throw new UsageError(
       "no routers found (looked for Next.js app/ and pages/ directories and React Router route definitions)",
@@ -971,7 +974,6 @@ function main() {
   let slots = [];
   let intercepts = [];
   let apiRoutes = 0;
-  const files = [...walkFiles(rootDir)];
   for (const r of roots) {
     if (r.kind === "next-app") {
       const label = path.relative(rootDir, r.dir) || "app";
