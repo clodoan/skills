@@ -14,20 +14,20 @@ screen truth. The flat view is the same scene through an orthographic
 front camera and is pixel-exact to spec; floating views use a
 perspective camera with presets.
 
-![grok.com floating on an iPhone 16 Pro, hero view](assets/grok-com-hero-3d.png)
+![x.ai floating on an iPhone 16 Pro, hero view](assets/xai-hero-3d.png)
 
 ## Quick start
 
 ```bash
 cd skills/plinth && npm install     # playwright-core + three + @fontsource/inter
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode app --view hero --dark
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode safari --dark   # flat, pixel-exact
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode app --view hero
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode safari              # flat, pixel-exact
 node scripts/plinth.mjs shot.png --device iphone-16-pro --view tilt-left               # frame an existing screenshot
 ```
 
 <p>
-  <img alt="fan of three iPhones showing grok.com" src="assets/grok-com-fan-3d.png" width="460" />
-  <img alt="phone + laptop combo showing grok.com" src="assets/grok-com-combo-3d.png" width="460" />
+  <img alt="fan of three iPhones showing x.ai/grok" src="assets/xai-fan-3d.png" width="460" />
+  <img alt="phone + laptop combo showing x.ai" src="assets/xai-combo-3d.png" width="460" />
 </p>
 
 ## Views
@@ -49,9 +49,9 @@ where no GPU exists). Dependencies: `playwright-core`, `three`,
 `@fontsource/inter`. ffmpeg only for `--scroll`/`--turntable`.
 
 <p>
-  <img alt="grok.com as iPhone 16 Pro, flat app mode: status bar, island, home indicator, content inside the safe area" src="assets/grok-com-iphone-16-pro-dark.png" width="300" />
+  <img alt="x.ai as iPhone 16 Pro, flat app mode: status bar, island, home indicator, content inside the safe area" src="assets/xai-iphone-16-pro-app.png" width="300" />
   &nbsp;
-  <img alt="grok.com as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/grok-com-iphone-16-pro-safari-dark.png" width="300" />
+  <img alt="x.ai as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/xai-iphone-16-pro-safari.png" width="300" />
 </p>
 
 All showcase shots are public, logged-out pages (captures run in a
@@ -151,8 +151,7 @@ environment, so the overlay validates against the cited numeric spec):
 
 | Site | Run | Result / findings |
 | --- | --- | --- |
-| [grok.com](https://grok.com) (logged out) | standalone + safari modes dark, multi-device dark row, browser light | All fidelity checks pass; showcase images above come from these runs. Spec overlay confirms region registration. |
-| x.ai / docs.x.ai / console.x.ai | `browser` | **Finding:** blocked for this test machine's egress (Cloudflare block page rendered; checks passed because the block page really rendered). Re-run from a normal network. |
+| [x.ai](https://x.ai) and public pages (/grok, /api, /news, /company) | app + safari modes, multi-device row, browser frame | All fidelity checks pass; showcase images above come from these runs. Spec overlay confirms region registration. **Finding:** Cloudflare blocks the default HeadlessChrome user agent outright (the block page rendered and dimension checks passed, because a page really did render) — plinth now presents the equivalent stable-Chrome UA, which passes. Always eyeball output on bot-walled sites. |
 | vercel.com, app-router.vercel.app, commerce-shopify.vercel.app, github.com | earlier runs | See git history: cookie banner via `--hide`, empty API-backed states, blocked-CDN blank pages — all documented app-state findings, not frame issues. |
 
 Known limitations: multi-device rows composite at @2x (mixed native
