@@ -84,10 +84,12 @@ export const DEVICES = {
     bezel: 11,
   },
   "ipad-pro-11": {
-    label: 'iPad Pro 11" (834×1194pt @2x)',            // [UYL16-family][1440]
+    // 834×1210pt is the M5/M4-era 11" iPad Pro (verified against the
+    // official bezel art's screen cutout: 1668×2420 px @2x) [1440]
+    label: 'iPad Pro 11" M5 (834×1210pt @2x)',
     kind: "tablet",
     os: "ios",
-    pt: { width: 834, height: 1194 },
+    pt: { width: 834, height: 1210 },
     dpr: 2,
     screenRadius: 18,                                  // [DCR] iPad family
     safeTop: 24,                                       // [1440]
@@ -452,6 +454,92 @@ function macMenuBarHtml(device, { statusColor, domain }) {
 }
 
 /**
+ * Superellipse corner points for 3D shapes (same curve as squirclePath).
+ * Returns [[x,y]...] tracing the rounded rect clockwise, origin top-left.
+ */
+export function squirclePoints(w, h, r, samples = 16) {
+  const d = squirclePath(w, h, r, 0, 0, samples);
+  return d.slice(1, -2).split(" L").map((pair) => pair.split(",").map(Number));
+}
+
+/**
+ * Physical body thickness in pt, derived from published physical
+ * dimensions scaled by logical width (e.g. iPhone 16 Pro: 8.25mm thick,
+ * 71.5mm wide, 402pt wide → ≈46pt). Laptop/browser values are display
+ * proportions, not physical claims.
+ */
+export function bodyThickness(device) {
+  switch (device.kind) {
+    case "phone": return device.os === "android" ? 44 : 46;
+    case "tablet": return 25;
+    case "laptop": return 16;
+    case "browser": return 22;
+    default: {
+      const exhaustive = device.kind;
+      throw new Error(`unhandled device kind: ${exhaustive}`);
+    }
+  }
+}
+
+/**
+ * The screen's inner layers only (no clip, no frame): bands, page
+ * content, status bar, Safari chrome, home indicator. This is the
+ * single source of screen truth — the 2D flat compositor clips it with
+ * the squircle, and the 3D renderer screenshots it as the screen
+ * texture. Returns { html, width, height } (pt).
+ */
+export function buildScreenHtml(device, opts) {
+  const {
+    contentHtml, bandColor, bottomColor, statusColor, indicatorColor,
+    domain = "", mode = "standalone", includeIsland = true,
+  } = opts;
+  const pt = device.pt;
+  switch (device.kind) {
+    case "phone":
+    case "tablet": {
+      const cr = contentRect(device, mode);
+      const bottomBandH = pt.height - cr.y - cr.height;
+      const bottomBand = mode !== "bare" && bottomBandH > 0
+        ? `<div style="position:absolute;left:0;bottom:0;width:${pt.width}px;height:${bottomBandH}px;background:${bottomColor}"></div>`
+        : "";
+      let statusSvg = device.os === "android"
+        ? androidStatusSvg(device, { color: statusColor })
+        : statusBarSvg(device, { color: statusColor });
+      if (!includeIsland) {
+        statusSvg = statusSvg.replace(/<rect [^>]*fill="#000"\/>/, "").replace(/<circle [^>]*fill="#000"\/>/, "");
+      }
+      const bareIsland = includeIsland && device.island
+        ? `<svg width="${pt.width}" height="${device.statusBar}" style="position:absolute;left:0;top:0"><rect x="${(pt.width - device.island.width) / 2}" y="${device.island.y}" width="${device.island.width}" height="${device.island.height}" rx="${device.island.height / 2}" fill="#000"/></svg>`
+        : "";
+      const html = `${bottomBand}${contentHtml}
+        ${mode === "bare" ? bareIsland : statusSvg}
+        ${mode === "safari" && device.os === "ios" ? safariBottomHtml(device, { domain, statusColor }) : ""}
+        ${mode === "bare" ? "" : homeIndicatorHtml(device, indicatorColor)}`;
+      return { html, width: pt.width, height: pt.height };
+    }
+    case "laptop":
+      return {
+        html: `${contentHtml}${macMenuBarHtml(device, { statusColor, domain })}`,
+        width: pt.width,
+        height: pt.height,
+      };
+    case "browser": {
+      const size = frameSize(device);
+      return {
+        html: `${browserChromeHtml(device, { url: opts.url ?? domain, theme: opts.frameTheme ?? "dark" })}
+          <div style="position:relative;width:${pt.width}px;height:${pt.height}px">${contentHtml}</div>`,
+        width: size.width - 2,
+        height: size.height - 2,
+      };
+    }
+    default: {
+      const exhaustive = device.kind;
+      throw new Error(`unhandled device kind: ${exhaustive}`);
+    }
+  }
+}
+
+/**
  * One framed device with faithful chrome. opts:
  *   contentHtml — the page layer (an <img> for stills; a scroll window for
  *                 video), already sized to contentRect
@@ -471,22 +559,11 @@ export function buildDeviceHtml(device, opts) {
     case "phone":
     case "tablet": {
       const clip = squirclePath(pt.width, pt.height, device.screenRadius);
-      const cr = contentRect(device, mode);
-      const bottomBandH = pt.height - cr.y - cr.height;
-      const bottomBand = mode !== "bare" && bottomBandH > 0
-        ? `<div style="position:absolute;left:0;bottom:0;width:${pt.width}px;height:${bottomBandH}px;background:${bottomColor}"></div>`
-        : "";
-      const statusSvg = device.os === "android"
-        ? androidStatusSvg(device, { color: statusColor })
-        : statusBarSvg(device, { color: statusColor });
+      const screen = buildScreenHtml(device, opts);
       return `<div class="frame" style="position:relative;width:${size.width}px;height:${size.height}px">
         <div style="position:absolute;left:${device.bezel}px;top:${device.bezel}px;width:${pt.width}px;height:${pt.height}px;
              background:${bandColor};clip-path:path('${clip}')">
-          ${bottomBand}
-          ${contentHtml}
-          ${mode === "bare" ? (device.island ? `<svg width="${pt.width}" height="${device.statusBar}" style="position:absolute;left:0;top:0"><rect x="${(pt.width - device.island.width) / 2}" y="${device.island.y}" width="${device.island.width}" height="${device.island.height}" rx="${device.island.height / 2}" fill="#000"/></svg>` : "") : statusSvg}
-          ${mode === "safari" && device.os === "ios" ? safariBottomHtml(device, { domain, statusColor }) : ""}
-          ${mode === "bare" ? "" : homeIndicatorHtml(device, indicatorColor)}
+          ${screen.html}
         </div>
         ${frameOverlaySvg(device, frameTheme, { buttons })}
       </div>`;
@@ -495,11 +572,11 @@ export function buildDeviceHtml(device, opts) {
       const c = FRAME_COLORS[frameTheme] ?? FRAME_COLORS.dark;
       const lidW = pt.width + 2 * device.bezel;
       const clip = squirclePath(pt.width, pt.height, device.screenRadius);
+      const screen = buildScreenHtml(device, opts);
       return `<div class="frame" style="width:${size.width}px;height:${size.height}px">
         <div style="position:relative;width:${lidW}px;margin:0 auto;background:${c.laptopBody};border:1px solid ${c.bodyEdge};box-sizing:border-box;border-radius:18px 18px 0 0;padding:${device.bezel - 1}px">
           <div style="position:relative;width:${pt.width}px;height:${pt.height}px;background:${bandColor};clip-path:path('${clip}');overflow:hidden">
-            ${contentHtml}
-            ${macMenuBarHtml(device, { statusColor, domain })}
+            ${screen.html}
           </div>
         </div>
         <div style="position:relative;width:${size.width}px;height:${device.deck.height}px;background:linear-gradient(${c.laptopBody},${c.bodyEdge});border-radius:0 0 14px 14px">
@@ -508,9 +585,9 @@ export function buildDeviceHtml(device, opts) {
     }
     case "browser": {
       const c = FRAME_COLORS[frameTheme] ?? FRAME_COLORS.dark;
+      const screen = buildScreenHtml(device, opts);
       return `<div class="frame" style="width:${size.width}px;height:${size.height}px;border-radius:${device.outerRadius}px;overflow:hidden;background:${bandColor};border:1px solid ${c.bodyEdge};box-sizing:border-box">
-        ${browserChromeHtml(device, { url, theme: frameTheme })}
-        <div style="position:relative;width:${pt.width}px;height:${pt.height}px">${contentHtml}</div>
+        ${screen.html}
       </div>`;
     }
     default: {

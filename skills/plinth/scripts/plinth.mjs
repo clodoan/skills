@@ -21,10 +21,11 @@ import process from "node:process";
 
 import {
   DEVICES, BACKGROUNDS, deviceList, frameSize, screenRect, contentRect,
-  buildDeviceHtml,
+  buildDeviceHtml, buildScreenHtml,
 } from "./devices.mjs";
 import { withBrowser, capture } from "./capture.mjs";
 import { pngSize, decodePng, getPixel, colorDistance } from "./png.mjs";
+import { findFrame, analyzeFrame, FRAME_MANIFEST } from "./frames.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -58,7 +59,11 @@ Options:
   --padding <px>      Padding around the frame (default 48)
   --no-shadow         Disable the drop shadow
   --dark              Dark color scheme for the page + dark background
-  --frame <theme>     Frame theme: dark | light (default dark)
+  --frame <path>      Composite into a real device frame PNG (any art
+                      with a transparent screen cutout). Default: the
+                      official Apple bezel from the fetch-frames cache,
+                      falling back to the procedural frame (offline only)
+  --frame-theme <t>   Procedural frame theme: dark | light (default dark)
   --hide <sel,sel>    CSS selectors to hide before capture (cookie banners)
   --wait <ms>         Extra settle time after load (default 800)
   --scroll            Scrolled capture of the full page → mp4 (or .gif --out)
@@ -73,8 +78,8 @@ Exit codes: 0 ok, 1 a verification check failed, 2 usage error.`;
 function parseArgs(argv) {
   const opts = {
     url: null, device: "iphone-16-pro", devices: null, out: null,
-    mode: "standalone", status: "auto", buttons: false,
-    bg: null, padding: 48, shadow: true, dark: false, frame: "dark",
+    mode: "standalone", status: "auto", buttons: false, frame: null,
+    bg: null, padding: 48, shadow: true, dark: false, frameTheme: "dark",
     hide: [], wait: 800, scroll: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -96,6 +101,7 @@ function parseArgs(argv) {
       case "--no-shadow": opts.shadow = false; break;
       case "--dark": opts.dark = true; break;
       case "--frame": opts.frame = next(); break;
+      case "--frame-theme": opts.frameTheme = next(); break;
       case "--hide": opts.hide = next().split(",").map((s) => s.trim()).filter(Boolean); break;
       case "--wait": opts.wait = Number(next()); break;
       case "--scroll": opts.scroll = true; break;
@@ -123,7 +129,7 @@ function parseArgs(argv) {
   if (!["auto", "light", "dark"].includes(opts.status)) {
     throw new UsageError("--status must be auto, light, or dark");
   }
-  if (!(opts.frame in { dark: 1, light: 1 })) throw new UsageError("--frame must be dark or light");
+  if (!(opts.frameTheme in { dark: 1, light: 1 })) throw new UsageError("--frame-theme must be dark or light");
   return opts;
 }
 
@@ -212,10 +218,162 @@ function deviceHtmlFor(device, shot, analysis, opts, contentHtmlOverride) {
     indicatorColor,
     url: opts.url,
     domain: opts.url.replace(/^https?:\/\//, "").replace(/\/.*$/, ""),
-    frameTheme: opts.frame,
+    frameTheme: opts.frameTheme,
     buttons: opts.buttons,
     mode: opts.mode,
   });
+}
+
+/**
+ * Screenshot the screen layers alone (no clip, no frame) at the given
+ * scale. In frame mode the island/punch hole is excluded — the real
+ * bezel art draws it.
+ */
+async function renderScreenTexture(browser, device, shot, analysis, opts, scale) {
+  const { statusColor, indicatorColor } = chromeColors(analysis, opts);
+  const cr = contentRect(device, opts.mode);
+  const contentHtml = `<img src="data:image/png;base64,${shot.buffer.toString("base64")}"
+    style="position:absolute;left:${cr.x}px;top:${cr.y}px;width:${cr.width}px;height:${cr.height}px;display:block" alt=""/>`;
+  const screen = buildScreenHtml(device, {
+    contentHtml,
+    bandColor: analysis.top.color,
+    bottomColor: analysis.bottom.color,
+    statusColor,
+    indicatorColor,
+    url: opts.url,
+    domain: opts.url.replace(/^(https?|file):\/\//, "").replace(/\/.*$/, ""),
+    frameTheme: opts.frameTheme,
+    mode: opts.mode,
+    includeIsland: false,
+  });
+  const html = `<!doctype html><html><head><style>${fontFaces()} * { margin:0; }</style></head>
+    <body><div id="stage" style="position:relative;width:${screen.width}px;height:${screen.height}px;background:${analysis.top.color};overflow:hidden">${screen.html}</div></body></html>`;
+  const context = await browser.newContext({
+    viewport: { width: screen.width + 10, height: screen.height + 10 },
+    deviceScaleFactor: scale,
+  });
+  try {
+    const page = await context.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    await page.evaluate(() => document.fonts?.ready).catch(() => {});
+    return await page.locator("#stage").screenshot({ type: "png" });
+  } finally {
+    await context.close();
+  }
+}
+
+/**
+ * Composite the screen texture into real device frame art. The
+ * screenshot is scaled to exactly the frame's transparent screen cutout
+ * and masked with the frame's own alpha (rounded corners, island), so
+ * nothing bleeds and there is no gap; the art then covers the seam.
+ */
+async function frameFlatComposite(browser, { device, shot, analysis, opts, frame }) {
+  const scale = frame.hole.width / device.pt.width;
+  const texture = await renderScreenTexture(browser, device, shot, analysis, opts, scale);
+  const padA = Math.round(opts.padding * scale);
+  const stageW = frame.img.width + 2 * padA;
+  const stageH = frame.img.height + 2 * padA;
+  const shadow = opts.shadow
+    ? "filter: drop-shadow(0 18px 38px rgba(0,0,0,0.28)) drop-shadow(0 4px 10px rgba(0,0,0,0.18));"
+    : "";
+  const html = `<!doctype html><html><head><style>
+    * { margin: 0; }
+    #stage { position: relative; width: ${stageW}px; height: ${stageH}px; background: ${background(opts)}; }
+    .device { position: absolute; left: ${padA}px; top: ${padA}px; ${shadow} }
+    .screen { position: absolute; left: ${frame.hole.x}px; top: ${frame.hole.y}px;
+      width: ${frame.hole.width}px; height: ${frame.hole.height}px;
+      mask-image: url(data:image/png;base64,${frame.maskPng.toString("base64")});
+      mask-size: 100% 100%; mask-mode: alpha;
+      -webkit-mask-image: url(data:image/png;base64,${frame.maskPng.toString("base64")});
+      -webkit-mask-size: 100% 100%; }
+    .screen img, .art { display: block; width: 100%; height: 100%; }
+  </style></head><body><div id="stage">
+    <div class="device" style="width:${frame.img.width}px;height:${frame.img.height}px">
+      <div class="screen"><img src="data:image/png;base64,${texture.toString("base64")}" alt=""/></div>
+      <img class="art" src="data:image/png;base64,${frame.buf.toString("base64")}" alt=""
+        style="position:absolute;left:0;top:0"/>
+    </div>
+  </div></body></html>`;
+  const { buffer } = await composite(browser, html, 1);
+  return { buffer, scale, padA };
+}
+
+function verifyFrameFlat({ out, frame, device, opts, shot, analysis, scale, padA }) {
+  const outImg = decodePng(out);
+  const dims = pngSize(out);
+  let ok = check(
+    "output matches frame art size",
+    Math.abs(dims.width - (frame.img.width + 2 * padA)) <= 1 &&
+      Math.abs(dims.height - (frame.img.height + 2 * padA)) <= 1,
+    `${dims.width}×${dims.height} vs frame ${frame.img.width}×${frame.img.height} + padding`,
+  );
+
+  // No bleed: at each hole-bbox corner the art is opaque (the screen's
+  // rounded corner curve) — the output pixel must equal the art pixel,
+  // i.e. no content escaped the mask.
+  const corners = [
+    [frame.hole.x + 2, frame.hole.y + 2],
+    [frame.hole.x + frame.hole.width - 3, frame.hole.y + 2],
+    [frame.hole.x + 2, frame.hole.y + frame.hole.height - 3],
+    [frame.hole.x + frame.hole.width - 3, frame.hole.y + frame.hole.height - 3],
+  ];
+  let bleedOk = true;
+  for (const [ax, ay] of corners) {
+    const artPx = getPixel(frame.img, ax, ay);
+    if (artPx[3] < 250) continue; // corner not covered by art in this frame
+    const outPx = getPixel(outImg, padA + ax, padA + ay);
+    if (colorDistance(outPx, artPx) > 10) bleedOk = false;
+  }
+  ok = check("no content bleed at the frame's screen corners", bleedOk) && ok;
+
+  // Content alignment: patch-average at the hole center vs the capture.
+  const patchAvg = (img, cx, cy) => {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const p = getPixel(img, cx + dx, cy + dy);
+        r += p[0]; g += p[1]; b += p[2]; n++;
+      }
+    }
+    return [r / n, g / n, b / n, 255];
+  };
+  const shotImg = decodePng(shot.buffer);
+  const cr = contentRect(device, opts.mode);
+  const contentCenterPt = [cr.x + cr.width / 2, cr.y + cr.height / 2];
+  const got = patchAvg(outImg,
+    Math.round(padA + frame.hole.x + contentCenterPt[0] * scale),
+    Math.round(padA + frame.hole.y + contentCenterPt[1] * scale));
+  const want = patchAvg(shotImg, Math.round(shot.pxWidth / 2), Math.round(shot.pxHeight / 2));
+  ok = check(
+    "frame alignment (content center patch)",
+    colorDistance(got, want) <= 12,
+    `output rgb(${got.map(Math.round).slice(0, 3)}) vs capture rgb(${want.map(Math.round).slice(0, 3)})`,
+  ) && ok;
+
+  if (device.island && opts.mode !== "bare") {
+    // The island is part of the art in frame mode.
+    const [ix, iy] = [
+      Math.round(padA + frame.hole.x + (device.pt.width / 2) * scale),
+      Math.round(padA + frame.hole.y + (device.island.y + device.island.height / 2) * scale),
+    ];
+    const px = getPixel(outImg, ix, iy);
+    ok = check("island covered by frame art at spec position", colorDistance(px, [0, 0, 0, 255]) <= 24, `rgb(${px.slice(0, 3)})`) && ok;
+  }
+
+  if (device.homeIndicator && opts.mode !== "bare" && device.kind !== "laptop") {
+    const hi = device.homeIndicator;
+    const hiY = device.pt.height - hi.bottomGap - hi.height / 2;
+    const hiPx = getPixel(outImg,
+      Math.round(padA + frame.hole.x + (device.pt.width / 2) * scale),
+      Math.round(padA + frame.hole.y + hiY * scale));
+    const bandPx = getPixel(outImg,
+      Math.round(padA + frame.hole.x + (device.pt.width / 2 - hi.width / 2 - 40) * scale),
+      Math.round(padA + frame.hole.y + hiY * scale));
+    ok = check("home indicator present at spec position", colorDistance(hiPx, bandPx) > 40,
+      `indicator rgb(${hiPx.slice(0, 3)}) vs band rgb(${bandPx.slice(0, 3)})`) && ok;
+  }
+  return ok;
 }
 
 async function composite(browser, html, dpr) {
@@ -391,6 +549,31 @@ async function main() {
         dark: opts.dark, hide: opts.hide, waitMs: opts.wait,
       });
       shots.push({ id, device, shot, analysis: analyzeCapture(shot.buffer) });
+    }
+
+    // Real device frame art (fetched cache or --frame override) is the
+    // primary single-device path; the procedural frame is an offline
+    // fallback only and never a showcase.
+    const frameFile = !multi ? findFrame(opts.deviceIds[0], opts.frame) : null;
+    if (frameFile) {
+      const frame = analyzeFrame(frameFile);
+      console.log(`  frame art: ${frameFile} (${frame.img.width}×${frame.img.height}, screen cutout ${frame.hole.width}×${frame.hole.height} @ ${frame.hole.x},${frame.hole.y})`);
+      const { device, shot, analysis } = shots[0];
+      const { buffer, scale, padA } = await frameFlatComposite(browser, { device, shot, analysis, opts, frame });
+      const outFile = opts.out ?? `plinth-${opts.deviceIds[0]}.png`;
+      mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
+      writeFileSync(outFile, buffer);
+      const dims = pngSize(buffer);
+      console.log(`  wrote ${outFile} (${dims.width}×${dims.height}, real frame art)`);
+      const ok = verifyFrameFlat({ out: buffer, frame, device, opts, shot, analysis, scale, padA });
+      if (!ok) {
+        console.error("plinth: verification failed — see checks above");
+        process.exit(EXIT_CHECK);
+      }
+      return;
+    }
+    if (!multi && FRAME_MANIFEST[opts.deviceIds[0]]) {
+      console.log("  note: procedural fallback frame (offline only) — fetch real device art with `node scripts/fetch-frames.mjs`");
     }
 
     const frames = shots.map(({ device, shot, analysis }) =>
