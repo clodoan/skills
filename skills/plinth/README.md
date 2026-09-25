@@ -1,31 +1,55 @@
 # Plinth
 
-Device-framed, DPR-correct screenshots of a running app or URL — the
-Figma-mockup-plugin workflow (device frames around app shots) without
-leaving the terminal, driven by your coding agent, with spec-accurate
-device chrome.
+Device mockups of a running app or URL, rendered as real 3D — the
+Figma-mockup-plugin workflow without leaving the terminal, driven by
+your coding agent, with spec-accurate device geometry.
 
-Plinth captures with Playwright at the device's **safe-area viewport**
-(page content never sits under the Dynamic Island, status bar, or home
-indicator), draws faithful chrome, and composites at native DPR. Frames
-and chrome are generated CSS/SVG — no copyrighted vendor artwork.
+Each device is built procedurally in three.js from the verified spec
+table (extruded continuous-corner body with bevels, titanium edge
+material, glass, the island as geometry, optional side buttons — no
+vendor 3D assets). The screen is a plane textured with the 2D
+compositor's output (page capture + status bar + Safari chrome + home
+indicator at native DPR) — that compositor stays the single source of
+screen truth. The flat view is the same scene through an orthographic
+front camera and is pixel-exact to spec; floating views use a
+perspective camera with presets.
 
-![grok.com (logged out) on phone, tablet and laptop frames, dark](assets/grok-com-multi-device-dark.png)
+![grok.com floating on an iPhone 16 Pro, hero view](assets/grok-com-hero-3d.png)
 
 ## Quick start
 
 ```bash
-cd skills/plinth && npm install     # playwright-core + @fontsource/inter
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --dark
-node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode safari --dark
+cd skills/plinth && npm install     # playwright-core + three + @fontsource/inter
+node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode app --view hero --dark
+node scripts/plinth.mjs https://grok.com --device iphone-16-pro --mode safari --dark   # flat, pixel-exact
+node scripts/plinth.mjs shot.png --device iphone-16-pro --view tilt-left               # frame an existing screenshot
 ```
+
+<p>
+  <img alt="fan of three iPhones showing grok.com" src="assets/grok-com-fan-3d.png" width="460" />
+  <img alt="phone + laptop combo showing grok.com" src="assets/grok-com-combo-3d.png" width="460" />
+</p>
+
+## Views
+
+`--view flat` (default) renders the orthographic front view —
+dimensions, island, indicator and alignment verified on every run.
+Floating views: `hero` (three-quarter), `tilt-left` / `tilt-right`,
+`top-down`, `fan` (three devices; one device is replicated), `combo`
+(largest device centered, phone front-right). Options: `--float <pt>`,
+`--transparent`, `--scale 1|2|3`, `--size WxH`, and `--turntable` for a
+seamless float/rotate loop (mp4/gif via ffmpeg). Environment light is a
+procedural room (PMREM); the contact shadow is a soft blob — both
+deterministic, verified by a determinism test.
 
 Requires Node ≥ 18 and an installed Chrome/Chromium (playwright-core
 drives it via the `chrome` channel — no browser download; set
-`PLINTH_BROWSER=/path/to/chrome` to override). ffmpeg only for `--scroll`.
+`PLINTH_BROWSER=/path/to/chrome` to override; WebGL runs on SwiftShader
+where no GPU exists). Dependencies: `playwright-core`, `three`,
+`@fontsource/inter`. ffmpeg only for `--scroll`/`--turntable`.
 
 <p>
-  <img alt="grok.com as iPhone 16 Pro, standalone mode: status bar, island, home indicator, content inside the safe area" src="assets/grok-com-iphone-16-pro-dark.png" width="300" />
+  <img alt="grok.com as iPhone 16 Pro, flat app mode: status bar, island, home indicator, content inside the safe area" src="assets/grok-com-iphone-16-pro-dark.png" width="300" />
   &nbsp;
   <img alt="grok.com as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/grok-com-iphone-16-pro-safari-dark.png" width="300" />
 </p>
@@ -142,10 +166,12 @@ above; no authenticated-session capture yet.
 cd skills/plinth && npm install && npm test
 ```
 
-14 tests, including fidelity assertions against a fixture with edge
-markers: no page pixels under the island/status bar/home indicator in
-standalone mode, exact content-origin at the safe-area top, island
-blackness at spec coordinates, home-indicator presence/contrast, safari
-pill presence, macOS menu bar + notch, browser chrome, deterministic
-multi-device dims, fractional DPR, scroll mp4. Tests self-skip without
-Chrome.
+17 tests. The flat-view fidelity assertions run against the 3D
+orthographic render (a fixture with edge markers proves no page pixels
+under the island/status bar/home indicator, exact content origin,
+island blackness at spec coordinates, home-indicator contrast, safari
+pill, macOS menu bar + notch, browser chrome, fractional DPR, scroll
+mp4). 3D-specific tests: transparent output keeps true alpha (corner
+alpha 0, body alpha 255) at the requested canvas size, and rendering is
+deterministic — the same input twice differs by a mean pixel distance
+under 0.5. Tests self-skip without Chrome.
