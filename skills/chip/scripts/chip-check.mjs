@@ -4,8 +4,8 @@
  *
  * Inspects a git diff (working tree vs base, or an explicit range) and
  * compares it against budgets: lines changed, files touched, top-level
- * areas touched, and risky surfaces (lockfiles, migrations, public
- * API/exports, CI config). Exits non-zero with a split suggestion when
+ * areas touched, and risky surfaces (lockfiles, migrations, chip config,
+ * public API/exports, CI config). Exits non-zero with a split suggestion when
  * a budget is blown, unless an explicit override is present.
  *
  * Zero dependencies. Node >= 18.
@@ -20,24 +20,15 @@ const EXIT_PASS = 0;
 const EXIT_FAIL = 1;
 const EXIT_USAGE = 2;
 
+// Rationale for each budget: README.md "What it measures".
 const DEFAULTS = {
-  // ~400 changed lines is where review effectiveness falls off a cliff
-  // (SmartBear/Cisco code review study). Chip aims below the ceiling,
-  // not at it.
   maxLines: 300,
-  // A step you can hold in your head. Mechanical renames can override.
   maxFiles: 12,
-  // A change plus its tests usually lives in <= 2 areas. Three or more
-  // areas means several concerns are riding along.
   maxAreas: 2,
-  // When a risky surface (lockfile, migration, CI config) is touched,
-  // everything else in the diff must stay under this many lines so the
-  // risky change ships (nearly) alone.
+  // Max lines outside a ship-alone risky surface when one is touched.
   riskyCompanionLines: 80,
-  // Directories whose immediate children are treated as separate areas
-  // (monorepo layouts).
+  // Directories whose immediate children are separate areas.
   areaRoots: ["packages", "apps", "libs", "services", "crates", "skills"],
-  // Glob patterns excluded from every count.
   ignore: [],
 };
 
@@ -92,8 +83,9 @@ Options:
   --range <a...b>     Check an explicit committed range instead of the
                       working tree (e.g. origin/main...HEAD in CI).
                       Must contain ".." or "...".
-  --config <path>     Path to config JSON. Default: chip.config.json at
-                      the repo root, if present.
+  --config <path>     Path to config JSON (relative to --cwd). Default:
+                      chip.config.json at the repo root; with --range it
+                      is read at the range's merge base.
   --override <reason> Explicit escape hatch. Reports violations but
                       exits 0. The reason is required and printed.
                       A "Chip-Override: <reason>" line in the newest
