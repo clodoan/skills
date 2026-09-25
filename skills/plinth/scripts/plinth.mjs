@@ -14,7 +14,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -25,7 +25,10 @@ import {
   buildDeviceHtml,
 } from "./devices.mjs";
 import { withBrowser, capture } from "./capture.mjs";
-import { pngSize, decodePng, getPixel, colorDistance } from "./png.mjs";
+import { pngSize, decodePng, getPixel } from "./png.mjs";
+import {
+  contentMismatch, chromePresence, expectedOutputSize, MAX_MISMATCH, MIN_CHROME,
+} from "./verify.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -304,71 +307,55 @@ function check(name, ok, detail) {
   return ok;
 }
 
-function verifySingle({ shot, out, device, opts, analysis }) {
-  const d = device;
-  const cr = contentRect(d, opts.mode);
-  const expectedShot = { w: Math.round(cr.width * d.dpr), h: Math.round(cr.height * d.dpr) };
+/**
+ * Prints check lines; true when all pass. `capture` is the decoded page
+ * capture (taller than the content rect for scroll frame 0).
+ */
+function verifyOutput({ output, capture, device, opts, analysis }) {
+  const want = expectedOutputSize(device, opts.padding);
   let ok = check(
-    "capture is DPR-exact (safe-area viewport)",
-    shot.pxWidth === expectedShot.w && shot.pxHeight === expectedShot.h,
-    `${shot.pxWidth}×${shot.pxHeight} vs spec ${expectedShot.w}×${expectedShot.h}`,
-  );
-
-  const size = frameSize(d);
-  const expected = {
-    w: Math.round((size.width + 2 * opts.padding) * d.dpr),
-    h: Math.round((size.height + 2 * opts.padding) * d.dpr),
-  };
-  const actual = pngSize(out);
-  ok = check(
     "output matches device spec",
-    Math.abs(actual.width - expected.w) <= 1 && Math.abs(actual.height - expected.h) <= 1,
-    `${actual.width}×${actual.height} vs expected ${expected.w}×${expected.h}`,
-  ) && ok;
-
-  const outImg = decodePng(out);
-  const sr = screenRect(d);
-  const abs = (ptX, ptY) => [
-    Math.round((opts.padding + sr.x + ptX) * d.dpr),
-    Math.round((opts.padding + sr.y + ptY) * d.dpr),
-  ];
-
-  // Content alignment: capture center must land at the content-rect center.
-  const [ccx, ccy] = abs(cr.x + cr.width / 2, cr.y + cr.height / 2);
-  const got = getPixel(outImg, ccx, ccy);
-  const shotImg = decodePng(shot.buffer);
-  const want = getPixel(shotImg, Math.round(shot.pxWidth / 2), Math.round(shot.pxHeight / 2));
+    Math.abs(output.width - want.width) <= 1 && Math.abs(output.height - want.height) <= 1,
+    `${output.width}×${output.height} vs expected ${want.width}×${want.height}`,
+  );
+  const content = contentMismatch(output, capture, device, opts.mode, opts.padding);
   ok = check(
-    "frame alignment (content center pixel)",
-    colorDistance(got, want) <= 6,
-    `output rgb(${got.slice(0, 3)}) vs capture rgb(${want.slice(0, 3)})`,
+    "content matches the capture pixel-for-pixel",
+    content.fraction <= MAX_MISMATCH,
+    `${content.bad}/${content.total} samples differ`,
   ) && ok;
-
-  if (d.kind === "phone" && d.island && opts.mode !== "bare") {
-    const island = d.island;
-    const samples = [
-      abs(d.pt.width / 2, island.y + island.height / 2),
-      abs(d.pt.width / 2 - island.width / 2 + 8, island.y + island.height / 2),
-      abs(d.pt.width / 2 + island.width / 2 - 8, island.y + island.height / 2),
-    ];
-    const black = samples.every(([x, y]) => colorDistance(getPixel(outImg, x, y), [0, 0, 0, 255]) <= 10);
-    ok = check("Dynamic Island is solid black at spec position", black) && ok;
-  }
-
-  if ((d.kind === "phone" || d.kind === "tablet") && d.homeIndicator && opts.mode !== "bare") {
-    const hi = d.homeIndicator;
-    const [hx, hy] = abs(d.pt.width / 2, d.pt.height - hi.bottomGap - hi.height / 2);
-    const px = getPixel(outImg, hx, hy);
-    const { indicatorColor } = chromeColors(analysis, opts);
-    const wantDark = indicatorColor.startsWith("rgba(0");
-    const lum = (0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]) / 255;
+  const bands = { top: analysis.top.rgb, bottom: analysis.bottom.rgb };
+  for (const region of chromePresence(output, device, opts.mode, opts.padding, bands)) {
     ok = check(
-      "home indicator present at spec position",
-      wantDark ? lum < 0.45 : lum > 0.55,
-      `pixel rgb(${px.slice(0, 3)})`,
+      `${region.name} drawn`,
+      region.fraction >= MIN_CHROME,
+      `${(region.fraction * 100).toFixed(1)}% of samples unlike the band`,
     ) && ok;
   }
   return ok;
+}
+
+function verifySingle({ shot, out, device, opts, analysis }) {
+  const cr = contentRect(device, opts.mode);
+  const w = Math.round(cr.width * device.dpr), h = Math.round(cr.height * device.dpr);
+  const ok = check(
+    "capture is DPR-exact (safe-area viewport)",
+    shot.pxWidth === w && shot.pxHeight === h,
+    `${shot.pxWidth}×${shot.pxHeight} vs spec ${w}×${h}`,
+  );
+  return verifyOutput({ output: decodePng(out), capture: analysis.img, device, opts, analysis }) && ok;
+}
+
+/**
+ * Moves the temp output into place: `out` when checks passed, otherwise
+ * `<name>.failed<ext>` beside it so a failed image is never mistaken for
+ * a good one. Returns the final path.
+ */
+export function finalizeOutput(tmp, out, ok) {
+  const ext = path.extname(out);
+  const dest = ok ? out : `${out.slice(0, out.length - ext.length)}.failed${ext}`;
+  renameSync(tmp, dest);
+  return dest;
 }
 
 async function renderScroll(browser, opts, device, outFile) {
@@ -465,21 +452,19 @@ async function main() {
 
     const outFile = opts.out ?? `plinth-${multi ? "multi" : opts.deviceIds[0]}.png`;
     mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
-    writeFileSync(outFile, buffer);
+    const tmp = `${outFile}.tmp-${process.pid}.png`;
+    writeFileSync(tmp, buffer);
     const dims = pngSize(buffer);
-    console.log(`  wrote ${outFile} (${dims.width}×${dims.height})`);
-
-    if (!multi) {
-      const ok = verifySingle({
-        shot: shots[0].shot, out: buffer, device: shots[0].device, opts,
-        analysis: shots[0].analysis,
-      });
-      if (!ok) {
-        console.error("plinth: verification failed — see checks above");
-        process.exit(EXIT_CHECK);
-      }
-    } else {
-      console.log(`  multi-device layout composited at @${MULTI_DPR}x (single-device runs are 1:1 native)`);
+    const ok = multi || verifySingle({
+      shot: shots[0].shot, out: buffer, device: shots[0].device, opts,
+      analysis: shots[0].analysis,
+    });
+    const dest = finalizeOutput(tmp, outFile, ok);
+    console.log(`  wrote ${dest} (${dims.width}×${dims.height})`);
+    if (multi) console.log(`  multi-device layout composited at @${MULTI_DPR}x (no checks; single-device runs are 1:1 native and verified)`);
+    if (!ok) {
+      console.error(`plinth: verification failed — see checks above; image kept at ${dest}`);
+      process.exitCode = EXIT_CHECK;
     }
   });
 }

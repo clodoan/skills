@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -110,9 +110,9 @@ test("standalone: DPR-exact safe-area capture, exact dims, all checks pass", opt
   // 402×778pt content viewport at @3x (874 − 62 top − 34 bottom) [devices.mjs]
   assert.match(res.out, /capture is DPR-exact \(safe-area viewport\) — ok \(1206×2334/);
   assert.match(res.out, /output matches device spec — ok/);
-  assert.match(res.out, /frame alignment \(content center pixel\) — ok/);
-  assert.match(res.out, /Dynamic Island is solid black at spec position — ok/);
-  assert.match(res.out, /home indicator present at spec position — ok/);
+  assert.match(res.out, /content matches the capture pixel-for-pixel — ok \(0\//);
+  assert.match(res.out, /status bar drawn — ok/);
+  assert.match(res.out, /bottom chrome drawn — ok/);
 
   const d = DEVICES["iphone-16-pro"];
   const size = frameSize(d);
@@ -524,4 +524,23 @@ test("checks catch shifted content and missing chrome that dimension checks miss
   });
   const status = chromePresence(wiped, d, "standalone", PAD, bands).find((r) => r.name === "status bar");
   assert.ok(status.fraction < MIN_CHROME, "wiped status bar not detected");
+});
+
+test("a failed check keeps the image at <name>.failed.png, never at --out", async () => {
+  const { finalizeOutput } = await import("./plinth.mjs");
+  const tmp = path.join(dir, "final.png.tmp");
+  writeFileSync(tmp, "x");
+  assert.equal(finalizeOutput(tmp, path.join(dir, "final.png"), false), path.join(dir, "final.failed.png"));
+  assert.ok(existsSync(path.join(dir, "final.failed.png")) && !existsSync(path.join(dir, "final.png")));
+  writeFileSync(tmp, "x");
+  assert.equal(finalizeOutput(tmp, path.join(dir, "final.png"), true), path.join(dir, "final.png"));
+  assert.ok(existsSync(path.join(dir, "final.png")) && !existsSync(tmp));
+});
+
+test("every device passes its checks on a real render", opts, () => {
+  for (const id of ["iphone-16", "iphone-15-pro", "ipad-pro-11"]) {
+    const res = render(`device-${id}`, [baseUrl, "--device", id]);
+    assert.equal(res.code, 0, res.out);
+    assert.doesNotMatch(res.out, /FAIL/);
+  }
 });
