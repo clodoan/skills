@@ -14,21 +14,21 @@ screen truth. The flat view is the same scene through an orthographic
 front camera and is pixel-exact to spec; floating views use a
 perspective camera with presets.
 
-![x.ai floating on an iPhone 16 Pro, hero view](assets/xai-hero-3d.png)
+Renders use **real, official device frame art** (Apple Product Bezels),
+fetched from Apple's CDN with a license gate — see below for why no
+framed example images are committed to this repo. In 3D views the same
+art is the device's front face, so the front view matches the flat
+render exactly.
 
 ## Quick start
 
 ```bash
-cd skills/plinth && npm install     # playwright-core + three + @fontsource/inter
-node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode app --view hero
-node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode safari              # flat, pixel-exact
+cd skills/plinth && npm install       # playwright-core + three + @fontsource/inter
+node scripts/fetch-frames.mjs         # official Apple bezel art (license-gated, cached)
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro                            # flat, real frame, pixel-exact
+node scripts/plinth.mjs https://x.ai --device iphone-16-pro --mode app --view hero     # floating 3D
 node scripts/plinth.mjs shot.png --device iphone-16-pro --view tilt-left               # frame an existing screenshot
 ```
-
-<p>
-  <img alt="fan of three iPhones showing x.ai/grok" src="assets/xai-fan-3d.png" width="460" />
-  <img alt="phone + laptop combo showing x.ai" src="assets/xai-combo-3d.png" width="460" />
-</p>
 
 ## Views
 
@@ -48,14 +48,35 @@ drives it via the `chrome` channel — no browser download; set
 where no GPU exists). Dependencies: `playwright-core`, `three`,
 `@fontsource/inter`. ffmpeg only for `--scroll`/`--turntable`.
 
-<p>
-  <img alt="x.ai as iPhone 16 Pro, flat app mode: status bar, island, home indicator, content inside the safe area" src="assets/xai-iphone-16-pro-app.png" width="300" />
-  &nbsp;
-  <img alt="x.ai as iPhone 16 Pro in safari mode with the compact bottom address bar" src="assets/xai-iphone-16-pro-safari.png" width="300" />
-</p>
+## Real device frames (fetched, never committed)
 
-All showcase shots are public, logged-out pages (captures run in a
-fresh browser context, so there is never a session to leak).
+`fetch-frames` downloads the official **Apple Product Bezels** from
+[Apple Design Resources](https://developer.apple.com/design/resources/)
+for iPhone 16 Pro, iPad Pro 11" (M5) and MacBook Pro 14" — photographic
+quality art with transparent screen cutouts. Their license is the
+**App Store Marketing Artwork License Agreement** (shipped inside each
+download and saved next to the cache): a *limited, non-exclusive,
+non-transferable* license to use the images *only in connection with
+your applications available on the App Store*, and *only while you are
+a member of the Apple Developer Program*; Apple remains the exclusive
+owner. That does not permit redistribution, so **no Apple art or
+render containing it is committed to this repo** — every machine runs
+`fetch-frames`, which shows the license, requires acceptance
+(interactive, or `--accept-license`), verifies pinned sha256 checksums
+of the .dmg and extracted PNGs, and caches to `~/.cache/plinth/frames`
+with attribution. Requires `7z` (p7zip) for Apple's .dmg packages.
+
+Compositing detects each frame's transparent screen cutout from its
+alpha channel (flood-fill of exterior transparency), scales the
+DPR-correct screenshot to exactly that rectangle, and masks it with the
+frame's own screen shape — rounded corners and island included — so
+nothing bleeds and there is no gap. Any PNG with a transparent cutout
+works via `--frame <path>`. Without cached art, the generated
+procedural frame is used as a clearly-labeled **offline fallback**
+(never for showcases).
+
+All captures are public, logged-out pages (fresh browser context, so
+there is never a session to leak).
 
 ## Phone presentation modes
 
@@ -124,9 +145,9 @@ the inner radius matches exactly with no gaps or halos. Side buttons:
 
 `scripts/spec-overlay.mjs` draws the cited geometry over any output for
 visual review (a real iOS Simulator isn't runnable in a Linux
-environment, so the overlay validates against the cited numeric spec):
-
-<img alt="spec overlay: status bar, island, safe-area and home-indicator regions drawn over a real render" src="assets/spec-overlay-iphone-16-pro.png" width="300" />
+environment, so the overlay validates against the cited numeric spec).
+In real-frame mode the additional checks assert directly against the
+art's own screen mask: corner no-bleed and the exact cutout size.
 
 ## Options
 
