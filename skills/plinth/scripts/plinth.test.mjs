@@ -306,3 +306,38 @@ test("png decoder round-trips Chromium output", opts, () => {
   assert.equal(img.width, pngSize(readFileSync(out)).width);
   assert.equal(getPixel(img, 0, 0).length, 4);
 });
+
+/** Pixels differing by more than `tol` within frame-relative pt columns [x0, x1). */
+function diffColumns(a, b, device, x0, x1, tol = 2) {
+  assert.equal(a.width, b.width);
+  assert.equal(a.height, b.height);
+  let diff = 0;
+  const px0 = Math.round((PAD + x0) * device.dpr), px1 = Math.round((PAD + x1) * device.dpr);
+  for (let y = 0; y < a.height; y++) {
+    for (let x = px0; x < px1; x++) {
+      if (colorDistance(getPixel(a, x, y), getPixel(b, x, y)) > tol) diff++;
+    }
+  }
+  return diff;
+}
+
+test("--buttons adds buttons without moving the frame, screen, or chrome", opts, () => {
+  const d = DEVICES["iphone-16-pro"];
+  const plain = render("flat", [baseUrl, "--device", "iphone-16-pro", "--no-shadow"]);
+  const btn = render("flat-buttons", [baseUrl, "--device", "iphone-16-pro", "--no-shadow", "--buttons"]);
+  assert.equal(btn.code, 0, btn.out);
+  const w = frameSize(d).width;
+  // Buttons sit outside x∈[1, w−1]; everything inside must be identical.
+  assert.equal(diffColumns(plain.img, btn.img, d, 1, w - 1), 0, "frame geometry changed with --buttons");
+  assert.ok(diffColumns(plain.img, btn.img, d, -3, 1) > 0, "left buttons missing");
+});
+
+test("--buttons on Pixel draws right-side buttons only", opts, () => {
+  const d = DEVICES["pixel-8"];
+  const plain = render("pixel-flat", [baseUrl, "--device", "pixel-8", "--no-shadow"]);
+  const btn = render("pixel-flat-buttons", [baseUrl, "--device", "pixel-8", "--no-shadow", "--buttons"]);
+  assert.equal(btn.code, 0, btn.out);
+  const w = frameSize(d).width;
+  assert.equal(diffColumns(plain.img, btn.img, d, -3, w - 1), 0, "left side or frame changed");
+  assert.ok(diffColumns(plain.img, btn.img, d, w - 1, w + 3) > 0, "right-side buttons missing");
+});

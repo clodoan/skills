@@ -270,13 +270,18 @@ export function frameOverlaySvg(device, theme = "dark", { buttons = false } = {}
   const btn = (x, y, w, h) =>
     `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${Math.min(w, h) / 2}" fill="${c.bodyEdge}"/>`;
   // Side buttons: positions measured off product photos — APPROX, optional.
-  const buttonsSvg = buttons && device.kind === "phone"
-    ? btn(-2.5, 150, 3, 28) + btn(-2.5, 196, 3, 48) + btn(-2.5, 254, 3, 48) +
-      btn(size.width - 0.5, 208, 3, 74)
-    : "";
+  // iPhone: action + volume left, side button right. Pixel: power above
+  // the volume rocker, both on the right.
+  const right = size.width - 0.5;
+  const buttonsSvg = !buttons || device.kind !== "phone" ? ""
+    : device.os === "android" ? btn(right, 190, 3, 46) + btn(right, 262, 3, 96)
+    : btn(-2.5, 150, 3, 28) + btn(-2.5, 196, 3, 48) + btn(-2.5, 254, 3, 48) + btn(right, 208, 3, 74);
+  // The viewBox grows 3pt each side for the buttons; the width must grow
+  // with it or the whole overlay scales down and misregisters.
+  const extra = buttons ? 6 : 0;
 
-  return `<svg class="frame-overlay" width="${size.width}" height="${size.height}"
-    viewBox="${buttons ? -3 : 0} 0 ${size.width + (buttons ? 6 : 0)} ${size.height}"
+  return `<svg class="frame-overlay" width="${size.width + extra}" height="${size.height}"
+    viewBox="${buttons ? -3 : 0} 0 ${size.width + extra} ${size.height}"
     style="position:absolute;left:${buttons ? -3 : 0}px;top:0;overflow:visible" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
