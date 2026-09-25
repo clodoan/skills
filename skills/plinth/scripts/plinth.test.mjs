@@ -9,12 +9,12 @@ import { fileURLToPath } from "node:url";
 import { DEVICES, frameSize, screenRect } from "./devices.mjs";
 import { decodePng, getPixel, pngSize, colorDistance } from "./png.mjs";
 
-const CLI = fileURLToPath(new URL("./bezel.mjs", import.meta.url));
+const CLI = fileURLToPath(new URL("./plinth.mjs", import.meta.url));
 
 const hasChrome =
   spawnSync("google-chrome", ["--version"], { stdio: "ignore" }).status === 0 ||
   spawnSync("google-chrome-stable", ["--version"], { stdio: "ignore" }).status === 0 ||
-  Boolean(process.env.BEZEL_BROWSER);
+  Boolean(process.env.PLINTH_BROWSER);
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 const opts = { skip: hasChrome ? false : "Chrome not installed" };
 
@@ -26,7 +26,7 @@ let baseUrl;
 let dir;
 
 before(async () => {
-  dir = mkdtempSync(path.join(tmpdir(), "bezel-test-"));
+  dir = mkdtempSync(path.join(tmpdir(), "plinth-test-"));
   server = spawn(process.execPath, [fileURLToPath(new URL("./fixture-server.mjs", import.meta.url))], {
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -45,7 +45,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function runBezel(args) {
+function runPlinth(args) {
   const res = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", cwd: dir });
   return { code: res.status, out: res.stdout + res.stderr };
 }
@@ -61,7 +61,7 @@ function screenPixel(outFile, deviceId, relX, relY, padding = 48) {
 
 test("single device: DPR-exact capture, exact output dims, alignment checks pass", opts, () => {
   const out = path.join(dir, "phone.png");
-  const res = runBezel([baseUrl, "--device", "iphone-15-pro", "--out", out]);
+  const res = runPlinth([baseUrl, "--device", "iphone-15-pro", "--out", out]);
   assert.equal(res.code, 0, res.out);
   assert.match(res.out, /capture is DPR-exact — ok \(1179×2556/);
   assert.match(res.out, /output matches device spec — ok/);
@@ -79,7 +79,7 @@ test("single device: DPR-exact capture, exact output dims, alignment checks pass
 
 test("--dark flips the page color scheme", opts, () => {
   const out = path.join(dir, "dark.png");
-  const res = runBezel([baseUrl, "--device", "iphone-15-pro", "--dark", "--out", out]);
+  const res = runPlinth([baseUrl, "--device", "iphone-15-pro", "--dark", "--out", out]);
   assert.equal(res.code, 0, res.out);
   assert.ok(
     colorDistance(screenPixel(out, "iphone-15-pro", 0.5, 0.5), [124, 58, 237, 255]) <= 6,
@@ -88,12 +88,12 @@ test("--dark flips the page color scheme", opts, () => {
 });
 
 test("--hide removes the cookie banner before capture", opts, () => {
-  const kept = runBezel([baseUrl, "--device", "browser", "--out", path.join(dir, "banner.png")]);
+  const kept = runPlinth([baseUrl, "--device", "browser", "--out", path.join(dir, "banner.png")]);
   assert.equal(kept.code, 0, kept.out);
   const bannerPx = screenPixel(path.join(dir, "banner.png"), "browser", 0.5, 0.98);
   assert.ok(colorDistance(bannerPx, [250, 204, 21, 255]) <= 6, `banner should be visible, got ${bannerPx}`);
 
-  const hidden = runBezel([baseUrl, "--device", "browser", "--hide", "#cookie", "--out", path.join(dir, "nobanner.png")]);
+  const hidden = runPlinth([baseUrl, "--device", "browser", "--hide", "#cookie", "--out", path.join(dir, "nobanner.png")]);
   assert.equal(hidden.code, 0, hidden.out);
   const px = screenPixel(path.join(dir, "nobanner.png"), "browser", 0.5, 0.98);
   assert.ok(colorDistance(px, [225, 29, 72, 255]) <= 6, `banner should be hidden, got ${px}`);
@@ -101,7 +101,7 @@ test("--hide removes the cookie banner before capture", opts, () => {
 
 test("multi-device row has deterministic @2x dimensions", opts, () => {
   const out = path.join(dir, "multi.png");
-  const res = runBezel([baseUrl, "--devices", "iphone-15-pro,macbook-14", "--out", out]);
+  const res = runPlinth([baseUrl, "--devices", "iphone-15-pro,macbook-14", "--out", out]);
   assert.equal(res.code, 0, res.out);
   const a = frameSize(DEVICES["iphone-15-pro"]);
   const b = frameSize(DEVICES["macbook-14"]);
@@ -112,14 +112,14 @@ test("multi-device row has deterministic @2x dimensions", opts, () => {
 });
 
 test("fractional DPR device (pixel-8 @2.625) is captured and verified", opts, () => {
-  const res = runBezel([baseUrl, "--device", "pixel-8", "--out", path.join(dir, "pixel.png")]);
+  const res = runPlinth([baseUrl, "--device", "pixel-8", "--out", path.join(dir, "pixel.png")]);
   assert.equal(res.code, 0, res.out);
   assert.match(res.out, /capture is DPR-exact — ok/);
 });
 
 test("--scroll writes a playable mp4 of the full page", { skip: opts.skip || (hasFfmpeg ? false : "ffmpeg not installed") }, () => {
   const out = path.join(dir, "scroll.mp4");
-  const res = runBezel([baseUrl, "--device", "iphone-15-pro", "--scroll", "--out", out]);
+  const res = runPlinth([baseUrl, "--device", "iphone-15-pro", "--scroll", "--out", out]);
   assert.equal(res.code, 0, res.out);
   assert.ok(existsSync(out));
   const probe = spawnSync("ffprobe", [
@@ -132,7 +132,7 @@ test("--scroll writes a playable mp4 of the full page", { skip: opts.skip || (ha
 });
 
 test("unknown device is a usage error listing devices", () => {
-  const res = runBezel(["http://localhost:1", "--device", "iphone-3g"]);
+  const res = runPlinth(["http://localhost:1", "--device", "iphone-3g"]);
   assert.equal(res.code, 2);
   assert.match(res.out, /unknown device/);
   assert.match(res.out, /iphone-15-pro/);

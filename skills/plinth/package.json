@@ -1,10 +1,10 @@
 {
-  "name": "bezel-skill",
+  "name": "plinth-skill",
   "private": true,
   "type": "module",
   "description": "Device-framed, DPR-correct app screenshots for coding agents",
   "scripts": {
-    "test": "node --test scripts/bezel.test.mjs"
+    "test": "node --test scripts/plinth.test.mjs"
   },
   "dependencies": {
     "playwright-core": "^1.49.0"

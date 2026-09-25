@@ -1,10 +1,10 @@
-# Bezel
+# Plinth
 
 Device-framed, DPR-correct screenshots of a running app or URL — the
 Figma-mockup-plugin workflow (device frames around app shots) without
 leaving the terminal, driven by your coding agent.
 
-Bezel captures with Playwright at exact device viewports and composites
+Plinth captures with Playwright at exact device viewports and composites
 the shot into a clean device frame generated as plain CSS (rounded
 bodies, camera pill, browser chrome dots — no copyrighted vendor
 artwork). Output is PNG, or a scrolled mp4/gif via ffmpeg.
@@ -14,8 +14,8 @@ artwork). Output is PNG, or a scrolled mp4/gif via ffmpeg.
 ## Quick start
 
 ```bash
-cd skills/bezel && npm install        # playwright-core, one dependency
-node scripts/bezel.mjs https://grok.com --device iphone-15-pro --dark
+cd skills/plinth && npm install        # playwright-core, one dependency
+node scripts/plinth.mjs https://grok.com --device iphone-15-pro --dark
 ```
 
 Requires Node ≥ 18 and an installed Chrome/Chromium (playwright-core
@@ -78,9 +78,9 @@ Every single-device run checks itself and exits 1 on failure:
 | x.ai / docs.x.ai / console.x.ai | `browser` | **Finding:** blocked for this test machine's egress (Cloudflare "you have been blocked" page rendered; checks passed because the block page really rendered). Re-run from a normal network to capture these. |
 | [vercel.com](https://vercel.com) | `iphone-15-pro --dark` | Clean; dark scheme respected; all checks pass. |
 | [app-router.vercel.app](https://app-router.vercel.app) (Next.js App Router playground) | `--devices iphone-15-pro,ipad-pro-11,macbook-14 --dark` | Multi-device row, 6410×2692 @2x. |
-| [commerce-shopify.vercel.app](https://commerce-shopify.vercel.app) (Vercel Commerce) | `browser --frame light`, `--scroll` mp4 | Real cookie banner hidden with `--hide '[class*="FeatureBar"]'`; product grid renders empty because the demo's Shopify backend returns no products — an app-state issue Bezel can't fix, look at your output. 61-frame scroll mp4 verified with ffprobe. |
+| [commerce-shopify.vercel.app](https://commerce-shopify.vercel.app) (Vercel Commerce) | `browser --frame light`, `--scroll` mp4 | Real cookie banner hidden with `--hide '[class*="FeatureBar"]'`; product grid renders empty because the demo's Shopify backend returns no products — an app-state issue Plinth can't fix, look at your output. 61-frame scroll mp4 verified with ffprobe. |
 | [github.com](https://github.com) | `browser` | Clean; checks pass. |
-| taxonomy.vercel.app | `macbook-14` | **Gotcha found:** this is *not* shadcn's taxonomy; it's an unrelated app loading React from a CDN that the test network blocked → blank screen. Bezel's checks passed (the page really was blank) — always eyeball the output. |
+| taxonomy.vercel.app | `macbook-14` | **Gotcha found:** this is *not* shadcn's taxonomy; it's an unrelated app loading React from a CDN that the test network blocked → blank screen. Plinth's checks passed (the page really was blank) — always eyeball the output. |
 
 Limitations found on real pages: sites that gate on cookies/geo render
 their gated state; JS from blocked third-party CDNs renders blank (not
@@ -95,7 +95,7 @@ URL); authenticated flows via a persistent browser profile.
 ## Tests
 
 ```bash
-cd skills/bezel && npm install && npm test
+cd skills/plinth && npm install && npm test
 ```
 
 Covers: DPR-exact capture and output dimensions, pixel-level frame
