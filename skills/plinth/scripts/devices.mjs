@@ -84,10 +84,12 @@ export const DEVICES = {
     bezel: 11,
   },
   "ipad-pro-11": {
-    label: 'iPad Pro 11" (834×1194pt @2x)',            // [UYL16-family][1440]
+    // 834×1210pt is the M5/M4-era 11" iPad Pro (verified against the
+    // official bezel art's screen cutout: 1668×2420 px @2x) [1440]
+    label: 'iPad Pro 11" M5 (834×1210pt @2x)',
     kind: "tablet",
     os: "ios",
-    pt: { width: 834, height: 1194 },
+    pt: { width: 834, height: 1210 },
     dpr: 2,
     screenRadius: 18,                                  // [DCR] iPad family
     safeTop: 24,                                       // [1440]

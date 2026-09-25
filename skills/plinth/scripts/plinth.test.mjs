@@ -1,16 +1,22 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEVICES, frameSize, screenRect, contentRect } from "./devices.mjs";
-import { decodePng, getPixel, pngSize, colorDistance } from "./png.mjs";
+import { decodePng, getPixel, pngSize, colorDistance, encodePng } from "./png.mjs";
+import { analyzeFrame } from "./frames.mjs";
 
 const CLI = fileURLToPath(new URL("./plinth.mjs", import.meta.url));
 const PAD = 48;
+
+// Tests must be hermetic: point the frame cache at an empty directory so
+// a developer's fetched Apple art never changes which path the CLI takes
+// (the fixture-frame tests pass --frame explicitly).
+process.env.PLINTH_FRAMES_DIR = mkdtempSync(path.join(tmpdir(), "plinth-frames-empty-"));
 
 // Fixture edge markers (see fixture-server.mjs): lime pins the top of the
 // page viewport, blue the bottom. Their presence inside chrome regions
@@ -272,6 +278,92 @@ test("--scroll writes a playable mp4 of the full page", { skip: opts.skip || (ha
   const [w, h, frames] = probe.stdout.trim().split(",").map(Number);
   assert.ok(w > 700 && h > 1400, `unexpected video dims ${w}×${h}`);
   assert.ok(frames >= 60, `expected >=60 frames, got ${frames}`);
+});
+
+/**
+ * Synthetic device-frame fixture (our own art, MIT): a gray body with a
+ * rounded transparent screen cutout sized exactly 402×874 (scale 1 for
+ * iphone-16-pro) plus an opaque island pill — so the real-frame pipeline
+ * is tested in CI without Apple's art or license.
+ */
+function makeFixtureFrame(file) {
+  const W = 502, H = 974, hole = { x: 50, y: 50, w: 402, h: 874 }, R = 40;
+  const px = Buffer.alloc(W * H * 4);
+  const inRounded = (x, y, rx, ry, rw, rh, r) => {
+    if (x < rx || x >= rx + rw || y < ry || y >= ry + rh) return false;
+    const cx = Math.max(rx + r, Math.min(x, rx + rw - r));
+    const cy = Math.max(ry + r, Math.min(y, ry + rh - r));
+    return (x - cx) ** 2 + (y - cy) ** 2 <= r * r || (x >= rx + r && x < rx + rw - r) || (y >= ry + r && y < ry + rh - r);
+  };
+  const isl = { w: 125, h: 37, x: 50 + (402 - 125) / 2, y: 50 + 11 };
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const body = inRounded(x, y, 10, 10, W - 20, H - 20, 60);
+      const screen = inRounded(x, y, hole.x, hole.y, hole.w, hole.h, R);
+      const island = inRounded(x, y, isl.x, isl.y, isl.w, isl.h, isl.h / 2);
+      if (island) { px[i] = 5; px[i + 1] = 5; px[i + 2] = 5; px[i + 3] = 255; }
+      else if (screen) { px[i + 3] = 0; }
+      else if (body) { px[i] = 90; px[i + 1] = 92; px[i + 2] = 96; px[i + 3] = 255; }
+    }
+  }
+  const buf = encodePng(W, H, px);
+  writeFileSync(file, buf);
+  return { W, H, hole };
+}
+
+test("analyzeFrame finds the screen cutout and mask of a frame PNG", () => {
+  const file = path.join(dir, "fixture-frame.png");
+  const fx = makeFixtureFrame(file);
+  const frame = analyzeFrame(file);
+  assert.equal(frame.img.width, fx.W);
+  assert.ok(Math.abs(frame.hole.x - fx.hole.x) <= 1 && Math.abs(frame.hole.y - fx.hole.y) <= 1,
+    `hole origin ${frame.hole.x},${frame.hole.y}`);
+  assert.ok(Math.abs(frame.hole.width - fx.hole.w) <= 2 && Math.abs(frame.hole.height - fx.hole.h) <= 2,
+    `hole size ${frame.hole.width}×${frame.hole.height}`);
+  // Mask: transparent at the hole's square corner (rounded cut), opaque center.
+  const mask = decodePng(frame.maskPng);
+  assert.equal(getPixel(mask, 1, 1)[3], 0, "mask must exclude the rounded corner");
+  assert.equal(getPixel(mask, Math.round(mask.width / 2), Math.round(mask.height / 2))[3], 255);
+});
+
+test("real-frame composite masks content to the frame's own screen shape", opts, () => {
+  const file = path.join(dir, "fixture-frame.png");
+  if (!existsSync(file)) makeFixtureFrame(file);
+  const out = path.join(dir, "framed.png");
+  const res = runPlinth([baseUrl, "--device", "iphone-16-pro", "--frame", file, "--out", out]);
+  assert.equal(res.code, 0, res.out);
+  assert.match(res.out, /real frame art/);
+  assert.match(res.out, /no content bleed at the frame's screen corners — ok/);
+  assert.match(res.out, /island covered by frame art at spec position — ok/);
+  assert.match(res.out, /home indicator present at spec position — ok/);
+
+  const img = decodePng(readFileSync(out));
+  const frame = analyzeFrame(file);
+  const padA = PAD; // scale 1 fixture
+  // Hole corner: fixture body color, not page content (mask enforced).
+  const corner = getPixel(img, padA + frame.hole.x + 2, padA + frame.hole.y + 2);
+  assert.ok(colorDistance(corner, [90, 92, 96, 255]) <= 10, `expected body at hole corner, got ${corner}`);
+  // Page's top edge marker sits exactly at the safe-area top inside the hole.
+  const d = DEVICES["iphone-16-pro"];
+  const markerY = padA + frame.hole.y + d.safeTop + 2;
+  let found = false;
+  for (let x = padA + frame.hole.x + 10; x < padA + frame.hole.x + frame.hole.width - 10; x += 4) {
+    if (colorDistance(getPixel(img, x, markerY), MARKER_TOP) <= 40) { found = true; break; }
+  }
+  assert.ok(found, "content top marker should start at the safe-area top inside the frame hole");
+});
+
+test("apple frame art from the cache is used when present (skips without cache)", { skip: !existsSync(path.join(process.env.HOME, ".cache/plinth/frames/iphone-16-pro.png")) || !hasChrome }, () => {
+  const out = path.join(dir, "apple-framed.png");
+  const res = spawnSync(process.execPath, [CLI, baseUrl, "--device", "iphone-16-pro", "--out", out], {
+    encoding: "utf8", cwd: dir,
+    env: { ...process.env, PLINTH_FRAMES_DIR: path.join(process.env.HOME, ".cache/plinth/frames") },
+  });
+  const outText = res.stdout + res.stderr;
+  assert.equal(res.status, 0, outText);
+  assert.match(outText, /screen cutout 1206×2622 @ 72,69/);
+  assert.match(outText, /no content bleed at the frame's screen corners — ok/);
 });
 
 test("unknown device is a usage error listing devices", () => {
