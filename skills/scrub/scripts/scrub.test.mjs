@@ -1,54 +1,132 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stampFilter, stampFontsize } from "./scrub.mjs";
 
 const CLI = fileURLToPath(new URL("./scrub.mjs", import.meta.url));
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 const opts = { skip: hasFfmpeg ? false : "ffmpeg not installed" };
+const canStamp = hasFfmpeg && spawnSync("ffmpeg", [
+  "-v", "error", "-f", "lavfi", "-i", "color=s=32x32:d=0.1", "-vf", "drawtext=text=f0", "-frames:v", "1", "-f", "null", "-",
+], { stdio: "ignore" }).status === 0;
+const stampOpts = { skip: canStamp ? false : "ffmpeg cannot draw text" };
 
 let dir;
 before(() => {
   dir = mkdtempSync(path.join(tmpdir(), "scrub-test-"));
   process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
-  if (!hasFfmpeg) return;
+});
 
+// Synthetic clips, built on first use so every test can run alone.
+const FIXTURES = {
   // Moving 40px box, back-ease-out (overshoot ~10%): still 0–0.5s,
   // animates x 20→220 over 0.5–1.5s peaking near x≈242, still 1.5–2.5s.
-  const easedX =
-    "if(lt(t,0.5),20,if(lt(t,1.5),20+200*(1+2.70158*pow(t-1.5,3)+1.70158*pow(t-1.5,2)),220))";
-  ffmpeg([
-    "-f", "lavfi", "-i", "color=c=0x202020:s=320x240:d=2.5:r=30",
-    "-f", "lavfi", "-i", "color=c=white:s=40x40:d=2.5:r=30",
-    "-filter_complex", `[0][1]overlay=x='${easedX}':y=100`,
-    "-pix_fmt", "yuv420p", file("eased.mp4"),
-  ]);
-
+  "eased.mp4": (out) => {
+    const easedX =
+      "if(lt(t,0.5),20,if(lt(t,1.5),20+200*(1+2.70158*pow(t-1.5,3)+1.70158*pow(t-1.5,2)),220))";
+    ffmpeg([
+      "-f", "lavfi", "-i", "color=c=0x202020:s=320x240:d=2.5:r=30",
+      "-f", "lavfi", "-i", "color=c=white:s=40x40:d=2.5:r=30",
+      "-filter_complex", `[0][1]overlay=x='${easedX}':y=100`,
+      "-pix_fmt", "yuv420p", out,
+    ]);
+  },
   // VFR variant: drop frames irregularly, keep original timestamps.
-  ffmpeg([
-    "-i", file("eased.mp4"),
-    "-vf", "select='not(mod(n\\,3))+not(mod(n\\,2))'",
-    "-fps_mode", "vfr", file("vfr.mp4"),
-  ]);
-
-  // Completely still clip.
-  ffmpeg(["-f", "lavfi", "-i", "color=c=0x404040:s=320x240:d=1.5:r=30", "-pix_fmt", "yuv420p", file("still.mp4")]);
-
-  // Long clip: 12s of continuous oscillation (360 frames).
-  ffmpeg([
+  // Matroska keeps the gaps without -fps_mode, which ffmpeg 4.4 lacks.
+  "vfr.mkv": (out) => ffmpeg(["-i", fixture("eased.mp4"), "-vf", "select='not(mod(n\\,3))+not(mod(n\\,2))'", out]),
+  "still.mp4": (out) => ffmpeg(["-f", "lavfi", "-i", "color=c=0x404040:s=320x240:d=1.5:r=30", "-pix_fmt", "yuv420p", out]),
+  // 12s of continuous oscillation (360 frames).
+  "long.mp4": (out) => ffmpeg([
     "-f", "lavfi", "-i", "color=c=0x202020:s=320x240:d=12:r=30",
     "-f", "lavfi", "-i", "color=c=white:s=30x30:d=12:r=30",
     "-filter_complex", "[0][1]overlay=x='145+100*sin(t*2)':y=100",
-    "-pix_fmt", "yuv420p", file("long.mp4"),
-  ]);
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  "eased.gif": (out) => ffmpeg(["-i", fixture("eased.mp4"), "-vf", "fps=15", out]),
+  // Box still at x=20 through frame 29, then 6px/frame until frame 59:
+  // motion arrives at frames 30..59 exactly.
+  "linear.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:d=3:r=30",
+    "-f", "lavfi", "-i", "color=c=white:s=40x40:d=3:r=30",
+    "-filter_complex", "[0][1]overlay=x='20+6*clip(n-30\\,0\\,30)':y=160",
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  // A 44px knob slides 40px in a large frame, arriving at frames 10–21;
+  // each row changes ~200px, well under the old 0.04%-of-frame floor.
+  "knob.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0xf0f0f0:s=1440x900:d=1:r=30",
+    "-f", "lavfi", "-i", "color=c=0x3478f6:s=44x44:d=1:r=30",
+    "-filter_complex", "[0][1]overlay=x='700+40*clip((n-10)/12\\,0\\,1)':y=450",
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  // A 200×120 card fades in over 200ms at 60fps (frames 19–30); each
+  // frame moves luma ~14 levels, under the 24-level "changed" threshold.
+  "fade.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=640x400:d=1:r=60",
+    "-f", "lavfi", "-i", "color=c=0xe0e0e0:s=200x120:d=1:r=60,format=yuva420p,fade=t=in:st=0.3:d=0.2:alpha=1",
+    "-filter_complex", "[0][1]overlay=x=220:y=140",
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  // A still frame encoded lossily with frequent keyframes: codec noise only.
+  "noisy.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "testsrc2=s=960x600:r=60:d=2",
+    "-vf", "trim=end_frame=1,loop=loop=-1:size=1,trim=end_frame=120,setpts=N/60/TB",
+    "-c:v", "libx264", "-crf", "30", "-g", "30", "-pix_fmt", "yuv420p", out,
+  ]),
+  // Retina-sized frame with a wide 40px band sliding across it.
+  "wide.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=2880x1800:d=0.5:r=30",
+    "-f", "lavfi", "-i", "color=c=white:s=1600x40:d=0.5:r=30",
+    "-filter_complex", "[0][1]overlay=x='100+40*n':y=900",
+    "-pix_fmt", "yuv420p", "-preset", "ultrafast", out,
+  ]),
+  // 640×360 stored, displayed rotated 90° (360×640); the box moves along
+  // stored y=20, which is a vertical band near the display's left edge.
+  "rotated.mp4": (out) => {
+    const src = file("rotated-src.mp4");
+    ffmpeg([
+      "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:d=1:r=30",
+      "-f", "lavfi", "-i", "color=c=white:s=30x30:d=1:r=30",
+      "-filter_complex", "[0][1]overlay=x='20+8*n':y=20", "-pix_fmt", "yuv420p", src,
+    ]);
+    // -display_rotation exists from ffmpeg 6.1; older builds honor the rotate tag.
+    try {
+      ffmpeg(["-display_rotation", "90", "-i", src, "-c", "copy", out]);
+    } catch {
+      ffmpeg(["-i", src, "-c", "copy", "-metadata:s:v:0", "rotate=90", out]);
+    }
+  },
+  "hfr.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=320x240:d=0.5:r=240",
+    "-f", "lavfi", "-i", "color=c=white:s=30x30:d=0.5:r=240",
+    "-filter_complex", "[0][1]overlay=x='10+n':y=100", "-pix_fmt", "yuv420p", out,
+  ]),
+  "one-frame.mp4": (out) => ffmpeg(["-i", fixture("linear.mp4"), "-frames:v", "1", out]),
+};
 
-  // GIF input.
-  ffmpeg(["-i", file("eased.mp4"), "-vf", "fps=15", file("eased.gif")]);
-});
+function fixture(name) {
+  const out = file(name);
+  if (!existsSync(out)) FIXTURES[name](out);
+  return out;
+}
+
+// Scrub each (fixture, args) once; later tests reuse the output.
+const runs = new Map();
+function scrubbed(name, args = [], env = {}) {
+  const key = [name, ...args, JSON.stringify(env)].join(" ");
+  if (!runs.has(key)) {
+    const outDir = file(`run-${runs.size}-${name.replace(/\W/g, "_")}`);
+    const { code, out } = runScrub([fixture(name), "--out", outDir, ...args], env);
+    assert.equal(code, 0, out);
+    runs.set(key, outDir);
+  }
+  return runs.get(key);
+}
 
 function file(name) {
   return path.join(dir, name);
@@ -58,8 +136,8 @@ function ffmpeg(args) {
   execFileSync("ffmpeg", ["-y", "-loglevel", "error", ...args], { encoding: "utf8" });
 }
 
-function runScrub(args) {
-  const res = spawnSync(process.execPath, [CLI, ...args], { cwd: dir, encoding: "utf8" });
+function runScrub(args, env = {}) {
+  const res = spawnSync(process.execPath, [CLI, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, ...env } });
   return { code: res.status, out: res.stdout + res.stderr };
 }
 
@@ -72,15 +150,58 @@ function readCsv(outDir) {
   });
 }
 
+function pngSize(png) {
+  const out = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0", png], { encoding: "utf8" });
+  return out.trim().split(",").map(Number);
+}
+
+function grayRegion(src, [x, y, w, h]) {
+  return execFileSync("ffmpeg", [
+    "-v", "error", "-i", src, "-vf", `crop=${w}:${h}:${x}:${y},format=gray`, "-f", "rawvideo", "-",
+  ]);
+}
+
+// Cell i of a 4x4 sheet (margin and padding 2px): [x, y, w, h].
+function cellRect(png, i, grid = 4) {
+  const [W, H] = pngSize(png);
+  const w = (W - 4 - 2 * (grid - 1)) / grid;
+  const h = (H - 4 - 2 * (grid - 1)) / grid;
+  return [2 + (i % grid) * (w + 2), 2 + Math.floor(i / grid) * (h + 2), w, h];
+}
+
+function meanAbsDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+// Compare a cell's stamp with scrub's stamp style drawing a literal label
+// (pixFmt: yuv420p for frame sheets, gray for diff sheets).
+function stampDiff(png, i, label, pixFmt) {
+  const [x, y, w, h] = cellRect(png, i);
+  const ref = file(`ref-${w}x${h}-${label.replace(/\W/g, "")}-${pixFmt}.png`);
+  const style = stampFilter("0", stampFontsize(w), 30).replace(/text='[^']*'/, `text='${label}'`);
+  ffmpeg(["-f", "lavfi", "-i", `color=c=black:s=${w}x${h}:d=0.1`, "-vf", `format=${pixFmt},${style}`, "-frames:v", "1", ref]);
+  const refPx = grayRegion(ref, [0, 0, w, h]);
+  let [x1, y1, x2, y2] = [w, h, 0, 0];
+  for (let p = 0; p < refPx.length; p++) {
+    if (refPx[p] > 0) [x1, y1, x2, y2] = [Math.min(x1, p % w), Math.min(y1, Math.floor(p / w)), Math.max(x2, p % w), Math.max(y2, Math.floor(p / w))];
+  }
+  const text = [x1, y1, x2 - x1 + 1, y2 - y1 + 1];
+  return meanAbsDiff(grayRegion(png, [x + text[0], y + text[1], text[2], text[3]]), grayRegion(ref, text));
+}
+
+function readIndex(outDir) {
+  return readFileSync(path.join(outDir, "index.md"), "utf8");
+}
+
 test("recovers eased motion with overshoot within tolerance", opts, () => {
-  const { code, out } = runScrub([file("eased.mp4")]);
-  assert.equal(code, 0, out);
-  const outDir = file("eased-scrub");
-  const rows = readCsv(outDir).filter((r) => r.cx !== null);
+  const rows = readCsv(scrubbed("eased.mp4")).filter((r) => r.cx !== null);
   assert.ok(rows.length > 15, `expected many motion rows, got ${rows.length}`);
 
-  // Motion starts near 500ms (frame 15 at 30fps).
-  assert.ok(Math.abs(rows[0].ms - 500) <= 100, `motion starts at ${rows[0].ms}ms, expected ~500ms`);
+  // x first changes on frame 16 (t=0.533s).
+  assert.equal(rows[0].frame, 16);
+  assert.equal(rows[0].ms, 533);
 
   // Overshoot: cx peaks well past where it settles.
   const maxCx = Math.max(...rows.map((r) => r.cx));
@@ -95,20 +216,23 @@ test("recovers eased motion with overshoot within tolerance", opts, () => {
   assert.ok(Math.min(...cys) >= 110 && Math.max(...cys) <= 130, `cy range ${Math.min(...cys)}–${Math.max(...cys)}`);
 });
 
+test("labels motion rows with the exact frame they arrive at", opts, () => {
+  const rows = readCsv(scrubbed("linear.mp4")).filter((r) => r.cx !== null);
+  assert.deepEqual([rows[0].frame, rows[0].ms], [30, 1000]);
+  assert.deepEqual([rows.at(-1).frame, rows.at(-1).ms], [59, 1967]);
+  // Row 30 spans the old (x=20) and new (x=26) box.
+  assert.deepEqual([rows[0].x, rows[0].w], [20, 46]);
+});
+
 test("trims still head/tail to an active window", opts, () => {
-  const index = readFileSync(file("eased-scrub/index.md"), "utf8");
-  const m = index.match(/Active window:\*\* frames (\d+)–(\d+)/);
-  assert.ok(m, "index.md should state the active window");
-  const [start, end] = [Number(m[1]), Number(m[2])];
-  // True motion spans frames 15–45 of 75; window is padded but must trim
-  // most of the 0–0.5s head and 1.5–2.5s tail.
-  assert.ok(start >= 8 && start <= 16, `window start ${start}, expected 8–16`);
-  assert.ok(end >= 43 && end <= 52, `window end ${end}, expected 43–52`);
+  const index = readIndex(scrubbed("linear.mp4"));
+  // First motion at 30, last at 59, padded by 3 frames (plus the frame before).
+  assert.match(index, /Active window:\*\* frames 26–62 /);
   assert.match(index, /still head\/tail trimmed automatically/);
 });
 
 test("crops to the motion band and upscales small crops", opts, () => {
-  const index = readFileSync(file("eased-scrub/index.md"), "utf8");
+  const index = readIndex(scrubbed("eased.mp4"));
   const m = index.match(/Motion crop:\*\* x=(\d+) y=(\d+) (\d+)×(\d+)px/);
   assert.ok(m, "index.md should state the motion crop");
   const [, , y, , h] = m.map(Number);
@@ -116,18 +240,17 @@ test("crops to the motion band and upscales small crops", opts, () => {
   // stay a horizontal band, not the full frame.
   assert.ok(y >= 60 && y <= 80, `crop y ${y}`);
   assert.ok(h <= 120, `crop h ${h} should be a band, not the full 240`);
-  assert.match(index, /upscaled \dx/);
+  assert.match(index, /shown at \dx on sheets/);
 });
 
-test("writes stamped contact sheets, diff sheets, chart, and index sections", opts, () => {
-  const outDir = file("eased-scrub");
+test("writes contact sheets, diff sheets, and index sections", opts, () => {
+  const outDir = scrubbed("eased.mp4");
   assert.ok(existsSync(path.join(outDir, "overview.png")));
   assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
   assert.ok(existsSync(path.join(outDir, "sheets/diff-01.png")));
-  assert.ok(existsSync(path.join(outDir, "motion-curve.svg")));
-  assert.ok(existsSync(path.join(outDir, "work/normalized.mp4")));
-  const index = readFileSync(path.join(outDir, "index.md"), "utf8");
-  for (const section of ["## Metadata", "## Motion summary", "## Files", "## Per-frame motion table", "## How to read the results"]) {
+  assert.deepEqual(readdirSync(path.join(outDir, "work")), ["normalized.mp4"]);
+  const index = readIndex(outDir);
+  for (const section of ["## Metadata", "## Motion summary", "## Files", "## Per-frame motion table"]) {
     assert.ok(index.includes(section), `missing ${section}`);
   }
   assert.match(index, /\| frame \| ms \|/);
@@ -135,54 +258,220 @@ test("writes stamped contact sheets, diff sheets, chart, and index sections", op
 });
 
 test("handles variable frame rate input", opts, () => {
-  const { code, out } = runScrub([file("vfr.mp4")]);
-  assert.equal(code, 0, out);
-  const index = readFileSync(file("vfr-scrub/index.md"), "utf8");
-  assert.match(index, /variable frame rate detected/);
+  const outDir = scrubbed("vfr.mkv");
+  assert.match(readIndex(outDir), /variable frame rate detected/);
 
   // The normalized clip must be constant-rate.
   const probe = JSON.parse(execFileSync("ffprobe", [
     "-v", "error", "-select_streams", "v:0",
     "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "json",
-    file("vfr-scrub/work/normalized.mp4"),
+    path.join(outDir, "work/normalized.mp4"),
   ], { encoding: "utf8" }));
   assert.equal(probe.streams[0].avg_frame_rate, probe.streams[0].r_frame_rate);
 
   // Motion is still recovered: overshoot survives retiming.
-  const rows = readCsv(file("vfr-scrub")).filter((r) => r.cx !== null);
+  const rows = readCsv(outDir).filter((r) => r.cx !== null);
   assert.ok(rows.length >= 8, `expected motion rows, got ${rows.length}`);
   const maxCx = Math.max(...rows.map((r) => r.cx));
   assert.ok(Math.abs(rows.at(-1).cx - 240) <= 12 && maxCx > rows.at(-1).cx, "motion shape recovered from VFR input");
 });
 
 test("still clip reports no motion and keeps output minimal", opts, () => {
-  const { code, out } = runScrub([file("still.mp4")]);
-  assert.equal(code, 0, out);
-  const index = readFileSync(file("still-scrub/index.md"), "utf8");
-  assert.match(index, /No motion detected/);
-  assert.ok(existsSync(file("still-scrub/overview.png")));
-  assert.ok(!existsSync(file("still-scrub/sheets/sheet-01.png")));
+  const outDir = scrubbed("still.mp4");
+  assert.match(readIndex(outDir), /No motion detected/);
+  assert.ok(existsSync(path.join(outDir, "overview.png")));
+  assert.ok(!existsSync(path.join(outDir, "sheets/sheet-01.png")));
 });
 
-test("long clips are capped and sampled by motion peaks", opts, () => {
-  const { code, out } = runScrub([file("long.mp4"), "--max-frames", "32"]);
-  assert.equal(code, 0, out);
-  const index = readFileSync(file("long-scrub/index.md"), "utf8");
-  assert.match(index, /motion peaks/);
-  const sheets = readdirSync(file("long-scrub/sheets")).filter((f) => f.startsWith("sheet-"));
-  assert.ok(sheets.length <= 2, `expected ≤2 dense sheets for --max-frames 32, got ${sheets.length}`);
+test("long clips are capped", opts, () => {
+  const outDir = scrubbed("long.mp4", ["--max-frames", "32"]);
+  const sheets = readdirSync(path.join(outDir, "sheets")).filter((f) => f.startsWith("sheet-"));
+  assert.deepEqual(sheets, ["sheet-01.png", "sheet-02.png"]);
+});
+
+test("capped windows are sampled evenly end to end", opts, () => {
+  const index = readIndex(scrubbed("linear.mp4", ["--max-frames", "12"], { SCRUB_NO_DRAWTEXT: "1" }));
+  assert.match(index, /evenly spaced, about every 3\.3 frames/);
+  const listed = index.match(/`sheets\/sheet-01.png \(and diff-01.png\)`: (.*)/)[1].match(/f(\d+) /g).map((f) => Number(f.slice(1)));
+  assert.deepEqual(listed, [26, 29, 33, 36, 39, 42, 46, 49, 52, 55, 59, 62]);
+});
+
+test("stamps each cell with its exact frame and rounded ms", stampOpts, () => {
+  const outDir = scrubbed("linear.mp4");
+  const sheet = path.join(outDir, "sheets/sheet-01.png");
+  const diff = path.join(outDir, "sheets/diff-01.png");
+  // Cells 3 and 4 hold frames 29 ("f29 967ms") and 30 ("f30 1000ms").
+  for (const [png, pixFmt] of [[sheet, "yuv420p"], [diff, "gray"]]) {
+    assert.ok(stampDiff(png, 3, "f29 967ms", pixFmt) < 2, `${png}: cell 3 should read f29 967ms`);
+    assert.ok(stampDiff(png, 4, "f30 1000ms", pixFmt) < 2, `${png}: cell 4 should read f30 1000ms`);
+    assert.ok(stampDiff(png, 3, "f29 966ms", pixFmt) > 2, "a wrong label must not match");
+  }
+});
+
+test("diff cells line up with sheet cells", opts, () => {
+  const outDir = scrubbed("linear.mp4");
+  const diff = path.join(outDir, "sheets/diff-01.png");
+  const top = (i) => { const [x, y, w, h] = cellRect(diff, i); return grayRegion(diff, [x, y, w, Math.floor(h / 2)]); };
+  // Frame 29 is still (black diff); frame 30 is the first move.
+  assert.ok(top(3).every((v) => v < 16), "cell 3 (f29) should be black");
+  assert.ok(top(4).some((v) => v > 128), "cell 4 (f30) should show the move");
+  // Window starting at frame 0: the first diff cell is black.
+  const longDiff = path.join(scrubbed("long.mp4", ["--max-frames", "32"]), "sheets/diff-01.png");
+  const [x, y, w, h] = cellRect(longDiff, 0);
+  assert.ok(grayRegion(longDiff, [x, y, w, Math.floor(h / 2)]).every((v) => v < 16), "frame 0 has no predecessor");
 });
 
 test("gif input just works", opts, () => {
-  const { code, out } = runScrub([file("eased.gif"), "--out", file("gif-scrub")]);
-  assert.equal(code, 0, out);
-  const index = readFileSync(file("gif-scrub/index.md"), "utf8");
-  assert.match(index, /## Motion summary/);
-  assert.ok(existsSync(file("gif-scrub/sheets/sheet-01.png")));
+  const outDir = scrubbed("eased.gif");
+  assert.match(readIndex(outDir), /## Motion summary/);
+  assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
 });
 
 test("missing input is a usage error", () => {
   const res = spawnSync(process.execPath, [CLI, "/nonexistent/clip.mp4"], { encoding: "utf8" });
   assert.equal(res.status, 2);
   assert.match(res.stdout + res.stderr, /input not found/);
+});
+
+test("--out never deletes a directory holding the input", opts, () => {
+  const project = file("project");
+  mkdirSync(project, { recursive: true });
+  copyFileSync(fixture("linear.mp4"), path.join(project, "clip.mp4"));
+  writeFileSync(path.join(project, "notes.txt"), "keep");
+  for (const out of [".", project, path.join(project, "clip.mp4")]) {
+    const res = spawnSync(process.execPath, [CLI, "clip.mp4", "--out", out], { cwd: project, encoding: "utf8" });
+    assert.equal(res.status, 2, res.stdout + res.stderr);
+    assert.match(res.stderr, /contains the input video/);
+  }
+  assert.deepEqual(readdirSync(project).sort(), ["clip.mp4", "notes.txt"]);
+});
+
+test("--out refuses a non-empty directory that is not a scrub output", opts, () => {
+  const foreign = file("foreign");
+  mkdirSync(foreign, { recursive: true });
+  writeFileSync(path.join(foreign, "keep.txt"), "mine");
+  const { code, out } = runScrub([fixture("still.mp4"), "--out", foreign]);
+  assert.equal(code, 2, out);
+  assert.match(out, /not a previous scrub output/);
+  assert.deepEqual(readdirSync(foreign), ["keep.txt"]);
+});
+
+test("re-running into a previous scrub output replaces only scrub's files", opts, () => {
+  const outDir = file("rerun-scrub");
+  assert.equal(runScrub([fixture("linear.mp4"), "--out", outDir]).code, 0);
+  writeFileSync(path.join(outDir, "sheets", "sheet-99.png"), "stale");
+  writeFileSync(path.join(outDir, "notes.md"), "mine");
+  const { code, out } = runScrub([fixture("still.mp4"), "--out", outDir]);
+  assert.equal(code, 0, out);
+  assert.match(readIndex(outDir), /No motion detected/);
+  assert.ok(!existsSync(path.join(outDir, "sheets", "sheet-99.png")), "stale sheet removed");
+  assert.equal(readFileSync(path.join(outDir, "notes.md"), "utf8"), "mine");
+});
+
+test("paths with %, colons, quotes and shell syntax work", opts, () => {
+  const names = ["50% off %d.mp4", "a:b.mp4", "x$(touch PWNED)`touch PWNED2`;'q'.mp4", path.join("100%", "clip.mp4")];
+  mkdirSync(file("100%"), { recursive: true });
+  for (const name of names) {
+    copyFileSync(fixture("linear.mp4"), file(name));
+    const { code, out } = runScrub([name]);
+    assert.equal(code, 0, `${name}: ${out}`);
+    assert.ok(existsSync(file(`${name.replace(/\.mp4$/, "")}-scrub/sheets/sheet-03.png`)), name);
+  }
+  assert.ok(!existsSync(file("PWNED")) && !existsSync(file("PWNED2")));
+});
+
+test("falls back to unstamped sheets when ffmpeg cannot draw text", opts, () => {
+  const outDir = file("nostamp-scrub");
+  const { code, out } = runScrub([fixture("linear.mp4"), "--out", outDir], { SCRUB_NO_DRAWTEXT: "1" });
+  assert.equal(code, 0, out);
+  assert.match(out, /cannot draw text.*ffmpeg-full/s);
+  assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
+  const index = readIndex(outDir);
+  assert.match(index, /Cells are unstamped/);
+  assert.match(index, /`sheets\/sheet-01.png \(and diff-01.png\)`: f26 867ms, f27 900ms, /);
+  assert.match(index, /`sheets\/sheet-03.png \(and diff-03.png\)`: f58 1933ms, .*f62 2067ms\n/);
+});
+
+test("detects a small element moving in a large frame", opts, () => {
+  const outDir = scrubbed("knob.mp4");
+  assert.match(readIndex(outDir), /Active window:\*\* frames 6–24 /);
+  const rows = readCsv(outDir).filter((r) => r.cx !== null);
+  assert.deepEqual([rows[0].frame, rows.at(-1).frame], [10, 21]);
+});
+
+test("detects a fade through faint change", opts, () => {
+  const outDir = scrubbed("fade.mp4");
+  assert.match(readIndex(outDir), /Active window:\*\* frames 15–33 /);
+  const rows = readCsv(outDir).filter((r) => r.faint_px > 0);
+  assert.deepEqual([rows[0].frame, rows.at(-1).frame], [19, 30]);
+  assert.ok(rows.every((r) => r.changed_px === 0 && r.w === 200 && r.h === 120), JSON.stringify(rows[0]));
+});
+
+test("codec noise on a still frame is not motion", opts, () => {
+  assert.match(readIndex(scrubbed("noisy.mp4")), /No motion detected/);
+});
+
+test("--min-px and --threshold tune detection", opts, () => {
+  assert.match(readIndex(scrubbed("knob.mp4", ["--min-px", "1000"])), /No motion detected/);
+  assert.match(readIndex(scrubbed("fade.mp4", ["--threshold", "20"])), /No motion detected/);
+  const { code, out } = runScrub([fixture("still.mp4"), "--threshold", "30"]);
+  assert.equal(code, 2);
+  assert.match(out, /--threshold must be at most 24/);
+});
+
+test("sheets stay under 4096px on both axes", opts, () => {
+  const outDir = scrubbed("wide.mp4");
+  const pngs = ["overview.png", ...readdirSync(path.join(outDir, "sheets")).map((f) => `sheets/${f}`)];
+  for (const png of pngs) {
+    const [w, h] = pngSize(path.join(outDir, png));
+    assert.ok(w <= 4096 && h <= 4096, `${png} is ${w}×${h}`);
+  }
+  assert.match(readIndex(outDir), /shown at 0\.\d\dx on sheets/);
+});
+
+test("rotated video uses display dimensions", opts, () => {
+  const outDir = scrubbed("rotated.mp4");
+  const index = readIndex(outDir);
+  assert.match(index, /Resolution:\*\* 360×640 px/);
+  const [, x, y, w, h] = index.match(/Motion crop:\*\* x=(\d+) y=(\d+) (\d+)×(\d+)px/).map(Number);
+  assert.ok(x + w <= 360 && y + h <= 640 && h > w, `crop ${x},${y} ${w}×${h}`);
+  // Cell 8 (box at display y≈518–548) shows the box, not an empty crop.
+  const sheet = path.join(outDir, "sheets/sheet-01.png");
+  const [cx, cy, cw, ch] = cellRect(sheet, 8);
+  assert.ok(grayRegion(sheet, [cx, cy, cw, Math.floor(ch * 0.8)]).some((v) => v > 200), "box visible in cell 8");
+});
+
+test("retina hint hedges both ways", opts, () => {
+  assert.match(readIndex(scrubbed("wide.mp4")), /large enough to be a 2x \(Retina\) capture, or a 1x large monitor/);
+  assert.match(readIndex(scrubbed("knob.mp4")), /could be a 1x capture or a 2x region capture/);
+});
+
+test("high frame rates normalize up to 120 fps and say when they drop frames", opts, () => {
+  const index = readIndex(scrubbed("hfr.mp4"));
+  assert.match(index, /constant 120 fps/);
+  assert.match(index, /faster than 120 fps\*\*, so normalizing dropped frames/);
+});
+
+test("index reports the median frame rate used for VFR", opts, () => {
+  assert.match(readIndex(scrubbed("vfr.mkv")), /median frame interval \d+\.\d\d fps/);
+});
+
+test("numeric flags round before validating; --pad accepts 0", opts, () => {
+  const { code, out } = runScrub([fixture("linear.mp4"), "--fps", "0.4"]);
+  assert.equal(code, 2);
+  assert.match(out, /--fps needs a whole number ≥ 1/);
+  assert.match(readIndex(scrubbed("linear.mp4", ["--pad", "0"])), /Motion crop:\*\* x=20 y=160 220×40px/);
+});
+
+test("a one-frame clip fails with a plain error", opts, () => {
+  const { code, out } = runScrub([fixture("one-frame.mp4"), "--out", file("one-scrub")]);
+  assert.equal(code, 2);
+  assert.match(out, /fewer than 2 frames after normalization; nothing to compare/);
+  assert.doesNotMatch(out, /Usage:/);
+});
+
+test("no-motion index does not list sheets that were not written", opts, () => {
+  const index = readIndex(scrubbed("still.mp4"));
+  assert.doesNotMatch(index, /sheets\/sheet-\*\.png/);
+  assert.doesNotMatch(index, /sheets\/diff-\*\.png/);
 });
