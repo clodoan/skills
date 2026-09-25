@@ -358,3 +358,44 @@ test("dotted top-level folders are segments unless they look like hosts; %5F esc
   assert.match(mmd, /subgraph \w+\["app · app\.example\.com"\]/);
   assert.match(md, /API route handlers[^\n]*:\*\* 1/);
 });
+
+test("react-router: JSX-only <Routes> apps are detected and nest by open/close tags", () => {
+  const root = makeApp("rrjsx", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/App.tsx": `import { BrowserRouter, Routes, Route } from "react-router-dom";
+      export default () => (
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/app" element={<Layout />}>
+              <Route index element={<Dash />} />
+              <Route path="inbox" element={<Inbox />} />
+              <Route element={<Shell />}>
+                <Route element={<Settings/>} path="settings" />
+              </Route>
+              <Route
+                path="inbox/:id"
+                element={<Msg />}
+              />
+            </Route>
+            <Route path={"/braced"} element={<B />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      );`,
+  });
+  const { code, out, mmd } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).labels, ["/", "/:rest*", "/app", "/app/inbox", "/app/inbox/:id", "/app/settings", "/braced"]);
+});
+
+test("react-router: path chains through a $-named config resolve", () => {
+  const root = makeApp("rrdollar", {
+    "package.json": "{}",
+    "src/routes.ts": `export const $routes = { home: { path: "/home" } };`,
+    "src/router.tsx": `createBrowserRouter([{ path: $routes.home.path }]);`,
+  });
+  const { code, mmd } = runRamble(root);
+  assert.equal(code, 0);
+  assert.deepEqual(graph(mmd).labels, ["/home"]);
+});

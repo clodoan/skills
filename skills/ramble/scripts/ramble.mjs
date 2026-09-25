@@ -240,6 +240,15 @@ function dependsOnNext(project) {
 
 const RR_DEFINES_ROUTES = /createBrowserRouter|createHashRouter|createMemoryRouter|createRoutesFromElements|useRoutes\s*\(|<Routes[\s>]|<Route\s[^>]*\bpath=/;
 
+/** Closest ancestor of `file` (within `root`) holding package.json; else root. */
+function nearestProject(file, root) {
+  for (let dir = path.dirname(file); dir.startsWith(root); dir = path.dirname(dir)) {
+    if (existsSync(path.join(dir, "package.json"))) return dir;
+    if (dir === root) break;
+  }
+  return root;
+}
+
 function detectRoots(root) {
   const roots = [];
   for (const dir of walkDirs(root)) {
@@ -446,7 +455,7 @@ function makeChainResolver(allFiles) {
     let found = null;
     for (const file of allFiles) {
       const text = readText(file);
-      const m = text.match(new RegExp(`(?:export\\s+)?const\\s+${ident}\\s*(?:=|:[^=]*=)\\s*`));
+      const m = text.match(new RegExp(`(?:export\\s+)?const\\s+${ident.replace(/\$/g, "\\$")}\\s*(?:=|:[^=]*=)\\s*`));
       if (!m) continue;
       const braceIdx = text.indexOf("{", m.index + m[0].length - 1);
       if (braceIdx === -1) continue;
@@ -468,64 +477,147 @@ function makeChainResolver(allFiles) {
   };
 }
 
+/** Scan a `<Route …>` tag from its `<` to its closing `>`, skipping {…} and strings. */
+function scanJsxTag(text, start) {
+  let depth = 0;
+  let quote = null;
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+    else if (depth === 0 && ch === ">") {
+      return { end: i + 1, selfClosing: text[i - 1] === "/", attrs: text.slice(start, i + 1) };
+    }
+  }
+  return { end: text.length, selfClosing: true, attrs: text.slice(start) };
+}
+
+function resolveModule(dir, spec) {
+  const base = path.resolve(dir, spec);
+  const exts = [".tsx", ".ts", ".jsx", ".js", ".mjs"];
+  const candidates = [base, ...exts.map((e) => base + e), ...exts.map((e) => path.join(base, `index${e}`))];
+  return candidates.find((c) => existsSync(c) && statSync(c).isFile()) ?? null;
+}
+
+/** Component name → file, for default/named/lazy imports from relative paths. */
+function relativeImports(file) {
+  const text = readText(file);
+  const map = new Map();
+  const add = (name, spec) => {
+    if (!spec.startsWith(".")) return;
+    const target = resolveModule(path.dirname(file), spec);
+    if (target && !map.has(name)) map.set(name, target);
+  };
+  for (const m of text.matchAll(/import\s+([\w$]+)?\s*,?\s*(?:\{([^}]*)\})?\s*from\s*["']([^"']+)["']/g)) {
+    if (m[1]) add(m[1], m[3]);
+    for (const part of (m[2] ?? "").split(",")) {
+      const [orig, alias] = part.trim().split(/\s+as\s+/);
+      if (orig) add((alias ?? orig).trim(), m[3]);
+    }
+  }
+  for (const m of text.matchAll(/(?:const|let)\s+([\w$]+)\s*=\s*(?:React\.)?lazy\(\s*\(\)\s*=>\s*import\(\s*["']([^"']+)["']/g)) {
+    add(m[1], m[2]);
+  }
+  return map;
+}
+
+const joinUrl = (parent, child) => {
+  const url = (child.startsWith("/") ? child : `${parent}/${child}`).replace(/\/+/g, "/").replace(/\/\*$/, "/:rest*");
+  return url !== "/" ? url.replace(/\/$/, "") : url;
+};
+
 /**
- * Best-effort, regex-based (no AST): collects `path:` values from
- * router config objects — string literals or identifier chains resolved
- * through a central paths config — joining relative child paths to the
- * nearest shallower `path` by brace depth. JSX <Route path> is
- * collected flat.
+ * Best-effort, regex-based (no AST). Object configs: `path:` values
+ * (literals or identifier chains through a central paths config) nest by
+ * brace depth. JSX: `<Route path>` nests by open/close tags. A route's
+ * `element` (or `Component`) that is a plain identifier imported from a
+ * relative file becomes the route's source file for edges; an index
+ * route's element maps to its parent route.
  */
-function parseReactRouter(files, appLabel, resolveChain) {
+function parseReactRouter(files, appOf, resolveChain) {
   const routes = [];
+  const byUrl = new Map();
   const unresolvedPaths = [];
-  const seen = new Set();
+  const token = /\{|\}|<Route\b|<\/Route\s*>|\bpath\s*:\s*(?:(["'`])((?:(?!\1).)*)\1|([\w$][\w$.]+))|\bindex\s*:\s*true|\b(?:element\s*:\s*<|Component\s*:\s*)([A-Z][\w$]*)/g;
   for (const file of files) {
     const text = readText(file);
-    const stack = []; // { depth, path }
+    const imports = relativeImports(file);
+    const lineAt = (i) => text.slice(0, i).split("\n").length;
+    const owner = appOf(file);
+    const addRoute = (urlPath) => {
+      const key = `${owner.app}:${urlPath}`;
+      if (!byUrl.has(key)) {
+        const route = { urlPath, file, sourceFile: null, groups: [], ...owner, dynamic: urlPath.includes(":") };
+        byUrl.set(key, route);
+        routes.push(route);
+      }
+      return byUrl.get(key);
+    };
+    const mapElement = (route, name) => {
+      const target = name && imports.get(name);
+      if (route && target && !route.sourceFile) route.sourceFile = target;
+    };
+    const rawPath = (literal, chain, index) => {
+      if (literal !== undefined) return literal;
+      const resolved = resolveChain(chain);
+      if (resolved === null) unresolvedPaths.push({ value: chain, file, line: lineAt(index) });
+      return resolved;
+    };
+
     let depth = 0;
-    const re = /\{|\}|path\s*:\s*(["'`])((?:(?!\1).)*)\1|path\s*:\s*([\w$][\w$.]+)|<Route[^>]*\spath=(["'])((?:(?!\4).)*)\4/g;
+    const pathStack = []; // object configs: { depth, url, route }
+    const frames = []; // object literals: { depth, route, element, index }
+    const jsx = []; // open <Route> tags: { url, route }
+    token.lastIndex = 0;
     let m;
-    while ((m = re.exec(text))) {
-      if (m[0] === "{") { depth++; continue; }
-      if (m[0] === "}") {
+    while ((m = token.exec(text))) {
+      const t = m[0];
+      if (t === "{") {
+        depth++;
+        frames.push({ depth, route: null, element: null, index: false });
+      } else if (t === "}") {
+        const frame = frames.pop();
         depth--;
-        while (stack.length && stack.at(-1).depth > depth) stack.pop();
-        continue;
-      }
-      let raw = m[2] ?? m[5];
-      if (raw === undefined && m[3]) {
-        raw = resolveChain?.(m[3]) ?? undefined;
-        if (raw === undefined) {
-          unresolvedPaths.push({
-            value: m[3],
-            file,
-            line: text.slice(0, m.index).split("\n").length,
-          });
-          continue;
+        while (pathStack.length && pathStack.at(-1).depth > depth) pathStack.pop();
+        if (frame?.route) mapElement(frame.route, frame.element);
+        else if (frame?.index) mapElement(pathStack.at(-1)?.route, frame.element);
+      } else if (t.startsWith("<Route")) {
+        const tag = scanJsxTag(text, m.index);
+        token.lastIndex = tag.end;
+        const a = tag.attrs;
+        const pm = a.match(/\spath=(?:(["'])(.*?)\1|\{\s*(["'`])(.*?)\3\s*\}|\{\s*([\w$][\w$.]+)\s*\})/);
+        const parent = jsx.at(-1) ?? { url: "", route: null };
+        const raw = pm ? rawPath(pm[2] ?? pm[4], pm[5], m.index) : null;
+        const element = a.match(/\selement=\{\s*<([A-Z][\w$]*)|\sComponent=\{\s*([A-Z][\w$]*)\s*\}/);
+        let node = parent;
+        if (raw !== null && raw !== undefined) {
+          const route = addRoute(joinUrl(parent.url, raw));
+          node = { url: route.urlPath, route };
+          mapElement(route, element?.[1] ?? element?.[2]);
+        } else if (/\sindex(?=[\s/>=])(?!=\{false\})/.test(a)) {
+          mapElement(parent.route, element?.[1] ?? element?.[2]);
         }
-      }
-      if (raw === undefined) continue;
-      let urlPath;
-      if (raw.startsWith("/")) {
-        urlPath = raw;
-        stack.push({ depth, path: raw });
+        if (!tag.selfClosing) jsx.push(node);
+      } else if (t.startsWith("</Route")) {
+        jsx.pop();
+      } else if (t.startsWith("index")) {
+        if (frames.length) frames.at(-1).index = true;
+      } else if (m[4]) {
+        if (frames.length) frames.at(-1).element = m[4];
       } else {
-        while (stack.length && stack.at(-1).depth >= depth) stack.pop();
-        const parent = stack.at(-1)?.path ?? "";
-        urlPath = `${parent}/${raw}`.replace(/\/+/g, "/");
-        stack.push({ depth, path: urlPath });
+        const raw = rawPath(m[2], m[3], m.index);
+        if (raw === null) continue;
+        while (pathStack.length && pathStack.at(-1).depth >= depth) pathStack.pop();
+        const route = addRoute(joinUrl(pathStack.at(-1)?.url ?? "", raw));
+        pathStack.push({ depth, url: route.urlPath, route });
+        if (frames.length) frames.at(-1).route = route;
       }
-      urlPath = urlPath.replace(/\/\*$/, "/:rest*");
-      if (urlPath !== "/") urlPath = urlPath.replace(/\/$/, "");
-      if (seen.has(urlPath)) continue;
-      seen.add(urlPath);
-      routes.push({
-        urlPath,
-        file,
-        groups: [],
-        app: appLabel,
-        dynamic: /:/.test(urlPath),
-      });
     }
   }
   return { routes, unresolvedPaths };
@@ -752,17 +844,24 @@ function main() {
     if (r.kind === "next-app") {
       const label = path.relative(rootDir, r.dir) || "app";
       const res = walkAppRouter(r.dir, label);
-      routes.push(...res.routes);
+      routes.push(...res.routes.map((route) => ({ ...route, project: r.project })));
       slots = slots.concat(res.slots);
       intercepts = intercepts.concat(res.intercepts);
       apiRoutes += res.apiRoutes;
     } else if (r.kind === "next-pages") {
-      const pages = walkPagesRouter(r.dir, path.relative(rootDir, r.dir) || "pages");
+      const pages = walkPagesRouter(r.dir, path.relative(rootDir, r.dir) || "pages")
+        .map((route) => ({ ...route, project: r.project }));
       if (pages.length === 0) r.empty = true; // e.g. only pages/api
       routes.push(...pages);
     } else if (r.kind === "react-router") {
       const allFiles = [...walkFiles(rootDir)];
-      const res = parseReactRouter(r.files, "react-router", makeChainResolver(allFiles));
+      const projects = [...new Set(r.files.map((f) => nearestProject(f, rootDir)))];
+      const appOf = (file) => {
+        const project = nearestProject(file, rootDir);
+        const rel = path.relative(rootDir, project) || ".";
+        return { project, app: projects.length > 1 ? `${rel} · react-router` : "react-router" };
+      };
+      const res = parseReactRouter(r.files, appOf, makeChainResolver(allFiles));
       routes.push(...res.routes);
       unresolvedRoutePaths.push(...res.unresolvedPaths.map((u) => ({
         ...u,
