@@ -63,6 +63,17 @@ clean box. Treat the curve as shape evidence (where motion starts,
 eases, overshoots, settles) and confirm positions visually on the
 sheets.
 
+## Naming what moved
+
+[`references/motion-vocabulary.md`](references/motion-vocabulary.md)
+gives the agent a shared vocabulary for motion (stagger, pop in, bounce,
+origin-aware, rubber-banding, and about 70 more) and maps each term to
+what it looks like in scrub's table and sheets. The agent can then
+report "a 40 ms stagger of scale-in entrances" instead of raw bbox
+numbers. Terms and definitions come from Emil Kowalski's
+[animation-vocabulary](https://github.com/emilkowalski/skills/tree/main/skills/animation-vocabulary)
+skill (MIT).
+
 ## Options
 
 ```

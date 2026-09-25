@@ -47,13 +47,17 @@ moved, and a per-frame motion table.
 
 ## Reporting findings
 
-Always answer in frame/ms terms tied to what the user asked:
+Always answer in frame/ms terms tied to what the user asked, and name
+what the numbers show with terms from
+[references/motion-vocabulary.md](references/motion-vocabulary.md),
+which maps each term to its signature in the table and sheets:
 
 > Movement runs frames 16–43 (533–1433 ms, ~900 ms total). The center-x
 > curve decelerates smoothly into the target, overshoots to ~257 px by
-> frame 31 and settles back to ~241 px by frame 43 — reads as a back
-> ease-out with ~10% overshoot. The spec says plain ease-out: the
-> overshoot at frames 30–35 is the mismatch.
+> frame 31 and settles back to ~241 px by frame 43 — reads as an
+> ease-out ending in a bounce (~10% overshoot, one reversal, so fairly
+> high damping). The spec says plain ease-out: the overshoot at frames
+> 30–35 is the mismatch.
 
 Call out: total duration, easing shape (from the position curve and the
 spacing of the diff bars), overshoot/settle, holds or dropped frames
