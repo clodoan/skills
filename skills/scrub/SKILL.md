@@ -19,7 +19,7 @@ moved, and a per-frame motion table.
 
 ## Workflow
 
-1. Run the script on the recording (requires ffmpeg on PATH):
+1. Run the script on the recording (requires ffmpeg ≥ 4.4 on PATH):
 
    ```bash
    node <path-to-skill>/scripts/scrub.mjs <recording>

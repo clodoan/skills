@@ -27,6 +27,7 @@ const CROP_MAX_COVERAGE = 0.85; // skip cropping when motion covers most of the 
 const UPSCALE_TARGET = 320; // upscale crops until min dimension reaches this
 const MAX_UPSCALE = 4;
 // Everything scrub writes; only these are removed when reusing an output dir.
+const NORMALIZED = path.join("work", "normalized.mp4");
 const SCRUB_OUTPUTS = ["index.md", "overview.png", "motion.csv", "motion-curve.svg", "sheets", "work"];
 
 class UsageError extends Error {}
@@ -124,6 +125,17 @@ function checkTools() {
   }
 }
 
+// Sheets fall back to unstamped cells when ffmpeg cannot draw text: no
+// drawtext filter (built without freetype, e.g. Homebrew's slim ffmpeg)
+// or no font it can find. SCRUB_NO_DRAWTEXT=1 forces the fallback.
+function canDrawText(outDir) {
+  if (process.env.SCRUB_NO_DRAWTEXT === "1") return false;
+  const res = spawnSync("ffmpeg", [
+    "-v", "error", "-i", NORMALIZED, "-vf", "drawtext=text=f0", "-frames:v", "1", "-f", "null", "-",
+  ], { cwd: outDir, stdio: "ignore" });
+  return res.status === 0;
+}
+
 function run(cmd, args, cwd) {
   try {
     return execFileSync(cmd, args, { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
@@ -189,32 +201,32 @@ function pickFps(meta, override) {
   return Math.min(60, Math.max(5, Math.round(candidate)));
 }
 
-function normalize(input, fps, workDir) {
-  const out = path.join(workDir, "normalized.mp4");
+function normalize(input, fps, outDir) {
+  const out = path.join(outDir, NORMALIZED);
   run("ffmpeg", [
     "-y", "-loglevel", "error", "-i", input,
     "-vf", `fps=${fps},scale=trunc(iw/2)*2:trunc(ih/2)*2`,
     "-an", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
-    out,
-  ]);
+    NORMALIZED,
+  ], outDir);
   const count = run("ffprobe", [
     "-v", "error", "-select_streams", "v:0", "-count_packets",
     "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", out,
   ]).trim();
-  return { file: out, frames: Number(count) };
+  return Number(count);
 }
 
 // One decode pass: per-transition motion bbox + changed-pixel fraction.
 // Output frame k of tblend is the difference between normalized frames
 // k and k+1, so row k describes motion arriving AT frame k+1.
-function motionPass(normalized, outDir) {
+function motionPass(outDir) {
   const metaFile = path.join("work", "motion-meta.txt");
   workFiles.push(path.join(outDir, metaFile));
   const chain =
     `format=gray,tblend=all_mode=difference,` +
     `lut=y=if(gt(val\\,${DIFF_THRESHOLD})\\,255\\,0),` +
     `bbox=min_val=1,signalstats,metadata=mode=print:file=${metaFile}`;
-  run("ffmpeg", ["-y", "-loglevel", "error", "-i", normalized, "-vf", chain, "-f", "null", "-"], outDir);
+  run("ffmpeg", ["-y", "-loglevel", "error", "-i", NORMALIZED, "-vf", chain, "-f", "null", "-"], outDir);
 
   const rows = [];
   let current = null;
@@ -304,7 +316,8 @@ function pickDenseFrames(start, end, table, maxFrames) {
   return { frames, strategy: "motion peaks (highest changed-pixel frames)" };
 }
 
-function drawtextFilter(labelExpr, fontsize) {
+function drawtextFilter(labelExpr, fontsize, stamps) {
+  if (!stamps) return "null";
   return (
     `drawtext=text='f%{eif\\:${labelExpr}\\:d} %{eif\\:t*1000\\:d}ms':` +
     `x=6:y=h-th-6:fontsize=${fontsize}:fontcolor=white:box=1:boxcolor=black@0.55`
@@ -315,19 +328,18 @@ function selectExpr(relFrames) {
   return `select='${relFrames.map((n) => `eq(n\\,${n})`).join("+")}'`;
 }
 
-function renderGraph(outDir, normalized, graph, outputPattern) {
-  const scriptFile = path.join(outDir, "work", `graph-${path.basename(outputPattern).replace(/%\d*d|\W/g, "")}.txt`);
-  writeFileSync(scriptFile, `[0:v]${graph}[out]`);
-  workFiles.push(scriptFile);
-  const args = [
-    "-y", "-loglevel", "error", "-i", normalized,
-    "-filter_complex_script", scriptFile,
-    "-map", "[out]", "-fps_mode", "passthrough", path.join(outDir, outputPattern),
-  ];
-  run("ffmpeg", args);
+// Runs inside outDir with relative paths, so a '%' in the user's path is
+// never read as an image2 pattern. setpts + -r 1 emits each tile exactly
+// once on every ffmpeg from 4.4 to 9 (no -fps_mode / -vsync needed).
+function renderGraph(outDir, graph, output) {
+  run("ffmpeg", [
+    "-y", "-loglevel", "error", "-i", NORMALIZED,
+    "-filter_complex", `[0:v]${graph},setpts=N/TB[out]`,
+    "-map", "[out]", "-r", "1", output,
+  ], outDir);
 }
 
-function renderSheets({ outDir, normalized, motion, crop, denseFrames, grid, fps, meta, totalFrames }) {
+function renderSheets({ outDir, motion, crop, denseFrames, grid, meta, totalFrames, stamps }) {
   const { start, end } = motion;
   const cellW = crop ? crop.w * crop.scale : meta.width;
   const fontsize = Math.min(36, Math.max(12, Math.round(cellW / 20)));
@@ -345,26 +357,45 @@ function renderSheets({ outDir, normalized, motion, crop, denseFrames, grid, fps
     Array.from({ length: overviewCount }, (_, i) =>
       Math.round((i * (totalFrames - 1)) / Math.max(1, overviewCount - 1))),
   )];
-  renderGraph(outDir, normalized,
-    `${drawtextFilter("n", Math.max(12, Math.round(meta.width / 40)))},${selectExpr(overviewFrames)},${tile}`,
+  renderGraph(outDir,
+    `${drawtextFilter("n", Math.max(12, Math.round(meta.width / 40)), stamps)},${selectExpr(overviewFrames)},${tile}`,
     "overview.png");
 
-  if (denseFrames.length === 0) return;
+  const sheets = { overview: overviewFrames, dense: denseFrames, diff: [] };
+  if (denseFrames.length === 0) return sheets;
 
   // Dense sheets: trimmed + cropped active window.
   const rel = denseFrames.map((f) => f - start);
-  renderGraph(outDir, normalized,
-    `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}${drawtextFilter(`n+${start}`, fontsize)},${selectExpr(rel)},${tile}`,
+  renderGraph(outDir,
+    `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}${drawtextFilter(`n+${start}`, fontsize, stamps)},${selectExpr(rel)},${tile}`,
     path.join("sheets", "sheet-%02d.png"));
 
   // Difference sheets: same window; diff frame k = change INTO frame start+k+1.
-  const relDiff = denseFrames.filter((f) => f > start).map((f) => f - start - 1);
+  sheets.diff = denseFrames.filter((f) => f > start);
+  const relDiff = sheets.diff.map((f) => f - start - 1);
   if (relDiff.length > 0) {
-    renderGraph(outDir, normalized,
+    renderGraph(outDir,
       `trim=start_frame=${start}:end_frame=${end + 1},${cropChain}format=gray,tblend=all_mode=difference,` +
-      `lut=y=min(val*4\\,255),${drawtextFilter(`n+${start}+1`, fontsize)},${selectExpr(relDiff)},${tile}`,
+      `lut=y=min(val*4\\,255),${drawtextFilter(`n+${start}+1`, fontsize, stamps)},${selectExpr(relDiff)},${tile}`,
       path.join("sheets", "diff-%02d.png"));
   }
+  return sheets;
+}
+
+// Without stamps, index.md carries each sheet's frames in cell order.
+function sheetFrameList(sheets, grid, ms) {
+  const cells = grid * grid;
+  const lines = [];
+  const add = (name, frames) => {
+    for (let i = 0; i * cells < frames.length; i++) {
+      const label = name.includes("%") ? name.replace("%", String(i + 1).padStart(2, "0")) : name;
+      lines.push(`- \`${label}\`: ${frames.slice(i * cells, (i + 1) * cells).map((f) => `f${f} ${ms(f)}ms`).join(", ")}`);
+    }
+  };
+  add("overview.png", sheets.overview);
+  add("sheets/sheet-%.png", sheets.dense);
+  add("sheets/diff-%.png", sheets.diff);
+  return lines.join("\n");
 }
 
 function writeCsv(outDir, table) {
@@ -442,7 +473,7 @@ function markdownTable(table, motion, maxRows = 36) {
 }
 
 function writeIndex(ctx) {
-  const { outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount } = ctx;
+  const { outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps } = ctx;
   const ms = (f) => Math.round((f * 1000) / fps);
   const retinaHint = Math.min(meta.width, meta.height) >= 1400
     ? "resolution suggests a 2x (Retina) capture — divide px by 2 for pt/logical units"
@@ -475,7 +506,7 @@ ${noMotion ? "**No motion detected** above the noise floor. The clip appears sta
 - \`sheets/diff-*.png\` — consecutive-frame differences (brightened 4×); bright pixels = what moved INTO the stamped frame
 - \`motion.csv\` — per-frame motion bounding box and changed-pixel count
 ${hasChart ? "- `motion-curve.svg` — plotted x/y center and changed-pixel curves\n" : ""}- \`work/normalized.mp4\` — the constant-rate clip all frame numbers refer to (use it for any further ffmpeg extraction)
-
+${stamps ? "" : `\n**Cells are unstamped** (this ffmpeg cannot draw text). Frames per sheet, row by row:\n\n${sheetFrameList(sheets, opts.grid, ms)}\n`}
 ## Per-frame motion table
 
 Estimated from pixel differencing between consecutive frames — this is
@@ -505,19 +536,25 @@ function main() {
   checkTools();
 
   const outDir = path.resolve(opts.out ?? `${opts.input.replace(/\.[^./]+$/, "")}-scrub`);
-  const workDir = path.join(outDir, "work");
   prepareOutDir(outDir, opts.input);
-
+  // Absolute, so ffmpeg never reads "name:" as a protocol prefix.
+  const input = path.resolve(opts.input);
   console.log(`scrub · probing ${opts.input}`);
-  const meta = probe(opts.input);
+  const meta = probe(input);
   const fps = pickFps(meta, opts.fps);
   if (meta.vfr) console.log(`  variable frame rate detected — normalizing to ${fps} fps`);
 
-  const { file: normalized, frames: totalFrames } = normalize(opts.input, fps, workDir);
+  const totalFrames = normalize(input, fps, outDir);
   if (totalFrames < 2) throw new UsageError("clip has fewer than 2 frames after normalization");
+  const stamps = canDrawText(outDir);
+  if (!stamps) {
+    console.error("scrub: warning: this ffmpeg cannot draw text (no drawtext filter or no usable font), " +
+      "so sheet cells are unstamped; index.md lists each sheet's frames. For stamps, install an ffmpeg " +
+      "with freetype and fontconfig, e.g. `brew install ffmpeg-full`.");
+  }
 
   console.log(`  analyzing ${totalFrames} frames at ${fps} fps`);
-  const rows = motionPass(normalized, outDir);
+  const rows = motionPass(outDir);
   const motion = analyzeMotion(rows, meta, totalFrames, fps);
   const crop = opts.crop && motion.active.length > 0 ? computeCrop(motion.union, opts.pad, meta) : null;
   const dense = motion.active.length > 0
@@ -525,12 +562,12 @@ function main() {
     : { frames: [], strategy: "none (no motion)" };
 
   console.log(`  rendering contact sheets`);
-  renderSheets({ outDir, normalized, motion, crop, denseFrames: dense.frames, grid: opts.grid, fps, meta, totalFrames });
+  const sheets = renderSheets({ outDir, motion, crop, denseFrames: dense.frames, grid: opts.grid, meta, totalFrames, stamps });
 
   writeCsv(outDir, motion.table);
   const hasChart = writeChart(outDir, motion.table, motion);
   const sheetsCount = Math.ceil(dense.frames.length / (opts.grid * opts.grid));
-  writeIndex({ outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount });
+  writeIndex({ outDir, opts, meta, fps, totalFrames, motion, crop, dense, hasChart, sheetsCount, sheets, stamps });
 
   if (!opts.keepWork) {
     for (const f of workFiles) rmSync(f, { force: true });

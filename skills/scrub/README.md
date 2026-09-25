@@ -17,8 +17,11 @@ node skills/scrub/scripts/scrub.mjs recording.mp4
 # → recording-scrub/index.md  (read this first)
 ```
 
-Requires ffmpeg + ffprobe on PATH (`brew install ffmpeg` /
-`apt-get install ffmpeg`) and Node ≥ 18. No other dependencies.
+Requires ffmpeg + ffprobe 4.4 or newer on PATH and Node ≥ 18. No other
+dependencies. Frame stamps need an ffmpeg that can draw text (freetype +
+fontconfig): Homebrew's `ffmpeg` can't, so use `brew install ffmpeg-full`
+(`apt-get install ffmpeg` is fine). Without it, scrub still runs, warns,
+and lists each sheet's frames in `index.md` instead of stamping cells.
 
 ## What it produces
 

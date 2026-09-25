@@ -32,7 +32,8 @@ const FIXTURES = {
     ]);
   },
   // VFR variant: drop frames irregularly, keep original timestamps.
-  "vfr.mp4": (out) => ffmpeg(["-i", fixture("eased.mp4"), "-vf", "select='not(mod(n\\,3))+not(mod(n\\,2))'", "-fps_mode", "vfr", out]),
+  // Matroska keeps the gaps without -fps_mode, which ffmpeg 4.4 lacks.
+  "vfr.mkv": (out) => ffmpeg(["-i", fixture("eased.mp4"), "-vf", "select='not(mod(n\\,3))+not(mod(n\\,2))'", out]),
   "still.mp4": (out) => ffmpeg(["-f", "lavfi", "-i", "color=c=0x404040:s=320x240:d=1.5:r=30", "-pix_fmt", "yuv420p", out]),
   // 12s of continuous oscillation (360 frames).
   "long.mp4": (out) => ffmpeg([
@@ -161,7 +162,7 @@ test("writes stamped contact sheets, diff sheets, chart, and index sections", op
 });
 
 test("handles variable frame rate input", opts, () => {
-  const outDir = scrubbed("vfr.mp4");
+  const outDir = scrubbed("vfr.mkv");
   assert.match(readIndex(outDir), /variable frame rate detected/);
 
   // The normalized clip must be constant-rate.
@@ -237,4 +238,28 @@ test("re-running into a previous scrub output replaces only scrub's files", opts
   assert.match(readIndex(outDir), /No motion detected/);
   assert.ok(!existsSync(path.join(outDir, "sheets", "sheet-99.png")), "stale sheet removed");
   assert.equal(readFileSync(path.join(outDir, "notes.md"), "utf8"), "mine");
+});
+
+test("paths with %, colons, quotes and shell syntax work", opts, () => {
+  const names = ["50% off %d.mp4", "a:b.mp4", "x$(touch PWNED)`touch PWNED2`;'q'.mp4", path.join("100%", "clip.mp4")];
+  mkdirSync(file("100%"), { recursive: true });
+  for (const name of names) {
+    copyFileSync(fixture("linear.mp4"), file(name));
+    const { code, out } = runScrub([name]);
+    assert.equal(code, 0, `${name}: ${out}`);
+    assert.ok(existsSync(file(`${name.replace(/\.mp4$/, "")}-scrub/sheets/sheet-03.png`)), name);
+  }
+  assert.ok(!existsSync(file("PWNED")) && !existsSync(file("PWNED2")));
+});
+
+test("falls back to unstamped sheets when ffmpeg cannot draw text", opts, () => {
+  const outDir = file("nostamp-scrub");
+  const { code, out } = runScrub([fixture("linear.mp4"), "--out", outDir], { SCRUB_NO_DRAWTEXT: "1" });
+  assert.equal(code, 0, out);
+  assert.match(out, /cannot draw text.*ffmpeg-full/s);
+  assert.ok(existsSync(path.join(outDir, "sheets/sheet-01.png")));
+  const index = readIndex(outDir);
+  assert.match(index, /Cells are unstamped/);
+  assert.match(index, /`sheets\/sheet-01.png`: f26 867ms, f27 900ms, /);
+  assert.match(index, /`sheets\/sheet-03.png`: f58 1933ms, .*f62 2067ms\n/);
 });
