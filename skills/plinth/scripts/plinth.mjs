@@ -14,7 +14,8 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync, realpathSync, renameSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { once } from "node:events";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -242,12 +243,14 @@ function stripStats(img, fromY, toY) {
   return { color: `rgb(${r},${g},${b})`, rgb: [r, g, b, 255], lum };
 }
 
-function analyzeCapture(buffer) {
+/** Band colors from the capture's first `screenH` px rows (the viewport). */
+function analyzeCapture(buffer, screenH) {
   const img = decodePng(buffer);
-  const strip = Math.max(4, Math.round(img.height * 0.01));
+  const bottom = Math.min(img.height, screenH ?? img.height);
+  const strip = Math.max(4, Math.round(bottom * 0.01));
   return {
     top: stripStats(img, 0, strip),
-    bottom: stripStats(img, img.height - strip, img.height),
+    bottom: stripStats(img, bottom - strip, bottom),
     img,
   };
 }
@@ -280,23 +283,22 @@ function deviceHtmlFor(device, shot, analysis, opts, contentHtmlOverride) {
   });
 }
 
-async function composite(browser, html, dpr) {
-  const context = await browser.newContext({
-    viewport: { width: 300, height: 300 },
-    deviceScaleFactor: dpr,
-  });
+/** Loads stage HTML sized to fit; caller closes `context`. */
+async function openStage(browser, html, dpr) {
+  const context = await browser.newContext({ viewport: { width: 300, height: 300 }, deviceScaleFactor: dpr });
   const page = await context.newPage();
+  await page.setContent(html, { waitUntil: "load" });
+  await page.evaluate(() => document.fonts?.ready).catch(() => {});
+  const stage = page.locator("#stage");
+  const box = await stage.boundingBox();
+  await page.setViewportSize({ width: Math.ceil(box.width) + 10, height: Math.ceil(box.height) + 10 });
+  return { context, page, stage };
+}
+
+async function composite(browser, html, dpr) {
+  const { context, stage } = await openStage(browser, html, dpr);
   try {
-    await page.setContent(html, { waitUntil: "load" });
-    await page.evaluate(() => document.fonts?.ready).catch(() => {});
-    const stage = page.locator("#stage");
-    const box = await stage.boundingBox();
-    await page.setViewportSize({
-      width: Math.ceil(box.width) + 10,
-      height: Math.ceil(box.height) + 10,
-    });
-    const buffer = await stage.screenshot({ type: "png", omitBackground: true });
-    return { buffer };
+    return await stage.screenshot({ type: "png", omitBackground: true });
   } finally {
     await context.close();
   }
@@ -358,13 +360,48 @@ export function finalizeOutput(tmp, out, ok) {
   return dest;
 }
 
+/** Streams PNG frames into ffmpeg; rejects (never crashes) if it fails. */
+async function encode(frames, outFile, fps) {
+  const vf = path.extname(outFile) === ".gif"
+    ? ["-filter_complex", "scale=trunc(iw/4)*2:-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"]
+    : ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "22"];
+  const ff = spawn("ffmpeg", ["-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(fps), "-i", "-", ...vf, outFile], {
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  let stderr = "";
+  let failure = null;
+  ff.stderr.on("data", (chunk) => { stderr += chunk; });
+  ff.stdin.on("error", (err) => { failure ??= err; });
+  const done = new Promise((resolve) => {
+    ff.on("error", (err) => { failure ??= err; resolve(); });
+    ff.on("close", (code) => { if (code !== 0) failure ??= new Error(`exited ${code}`); resolve(); });
+  });
+  try {
+    for await (const frame of frames) {
+      if (failure) break;
+      if (!ff.stdin.write(frame)) await Promise.race([once(ff.stdin, "drain"), done]);
+    }
+  } finally {
+    ff.stdin.end();
+  }
+  await done;
+  if (failure) throw new Error(`ffmpeg failed: ${stderr.trim().split("\n").pop() || failure.message}`);
+}
+
+/**
+ * Full-page capture scrolled inside the frame → mp4/gif. The page is
+ * captured once and slid upward, so sticky/fixed elements scroll with
+ * the content (they are not re-pinned per frame). Frame 0 is verified.
+ */
 async function renderScroll(browser, opts, device, outFile) {
   const cr = contentRect(device, opts.mode);
+  console.log(`plinth · capturing ${opts.url} as ${device.label} full page (scroll)`);
   const shot = await capture(browser, opts.url, {
     device, viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
     dark: opts.dark, hide: opts.hide, waitMs: opts.wait, fullPage: true,
   });
-  const analysis = analyzeCapture(shot.buffer);
+  // Bands come from the first screen: that is what frame 0 shows.
+  const analysis = analyzeCapture(shot.buffer, Math.round(cr.height * device.dpr));
   const fullCssH = shot.pxHeight / device.dpr;
   const fps = 30;
   const seconds = Math.min(8, Math.max(2, (fullCssH - cr.height) / 400));
@@ -375,42 +412,34 @@ async function renderScroll(browser, opts, device, outFile) {
       <img id="shot" src="${src}" style="display:block;width:${cr.width}px;height:${fullCssH}px" alt=""/>
     </div>`;
   const html = stageHtml([deviceHtmlFor(device, shot, analysis, opts, contentHtml)], opts);
+  const { context, page, stage } = await openStage(browser, html, device.dpr);
 
-  const context = await browser.newContext({
-    viewport: { width: 300, height: 300 }, deviceScaleFactor: device.dpr,
-  });
-  const page = await context.newPage();
-  await page.setContent(html, { waitUntil: "load" });
-  await page.evaluate(() => document.fonts?.ready).catch(() => {});
-  const stage = page.locator("#stage");
-  const box = await stage.boundingBox();
-  await page.setViewportSize({ width: Math.ceil(box.width) + 10, height: Math.ceil(box.height) + 10 });
-
-  const isGif = outFile.endsWith(".gif");
-  const vf = isGif
-    ? "scale=trunc(iw/4)*2:-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"
-    : "scale=trunc(iw/2)*2:trunc(ih/2)*2";
-  const args = [
-    "-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(fps),
-    "-i", "-", ...(isGif ? ["-filter_complex", vf] : ["-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "22"]),
-    outFile,
-  ];
-  const ff = spawn("ffmpeg", args, { stdio: ["pipe", "inherit", "inherit"] });
   const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
-  for (let i = 0; i <= steps; i++) {
-    const y = Math.round(ease(i / steps) * Math.max(0, fullCssH - cr.height));
-    await page.evaluate((off) => {
-      document.getElementById("shot").style.transform = `translateY(-${off}px)`;
-    }, y);
-    const frame = await stage.screenshot({ type: "png" });
-    if (!ff.stdin.write(frame)) await new Promise((r) => ff.stdin.once("drain", r));
+  let ok = true;
+  async function* frames() {
+    for (let i = 0; i <= steps; i++) {
+      const y = Math.round(ease(i / steps) * Math.max(0, fullCssH - cr.height));
+      await page.evaluate((off) => {
+        document.getElementById("shot").style.transform = `translateY(-${off}px)`;
+      }, y);
+      const frame = await stage.screenshot({ type: "png" });
+      if (i === 0) ok = verifyOutput({ output: decodePng(frame), capture: analysis.img, device, opts, analysis });
+      yield frame;
+    }
   }
-  ff.stdin.end();
-  await new Promise((resolve, reject) => {
-    ff.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-  });
-  await context.close();
-  console.log(`  wrote ${outFile} (${steps + 1} frames, ${seconds.toFixed(1)}s scroll)`);
+  const ext = path.extname(outFile).toLowerCase();
+  const tmp = `${outFile}.tmp-${process.pid}${ext}`;
+  try {
+    await encode(frames(), tmp, fps);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  } finally {
+    await context.close();
+  }
+  const dest = finalizeOutput(tmp, outFile, ok);
+  console.log(`  wrote ${dest} (${steps + 1} frames, ${seconds.toFixed(1)}s scroll; frame 0 checked)`);
+  return { ok, dest };
 }
 
 function requireFfmpeg() {
@@ -429,7 +458,11 @@ async function main() {
       const device = DEVICES[opts.deviceIds[0]];
       const outFile = opts.out ?? `plinth-${opts.deviceIds[0]}-scroll.mp4`;
       mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
-      await renderScroll(browser, opts, device, outFile);
+      const { ok, dest } = await renderScroll(browser, opts, device, outFile);
+      if (!ok) {
+        console.error(`plinth: verification failed — see checks above; video kept at ${dest}`);
+        process.exitCode = EXIT_CHECK;
+      }
       return;
     }
 
@@ -448,7 +481,7 @@ async function main() {
     const frames = shots.map(({ device, shot, analysis }) =>
       deviceHtmlFor(device, shot, analysis, opts));
     const dprOut = multi ? MULTI_DPR : shots[0].device.dpr;
-    const { buffer } = await composite(browser, stageHtml(frames, opts), dprOut);
+    const buffer = await composite(browser, stageHtml(frames, opts), dprOut);
 
     const outFile = opts.out ?? `plinth-${multi ? "multi" : opts.deviceIds[0]}.png`;
     mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });

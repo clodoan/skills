@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -543,4 +543,47 @@ test("every device passes its checks on a real render", opts, () => {
     assert.equal(res.code, 0, res.out);
     assert.doesNotMatch(res.out, /FAIL/);
   }
+});
+
+const ffOpts = { skip: opts.skip || (hasFfmpeg ? false : "ffmpeg not installed") };
+
+test("--scroll verifies frame 0 and colors its bottom band from the first screen", ffOpts, () => {
+  const d = DEVICES["iphone-16-pro"];
+  const out = path.join(dir, "band.mp4");
+  const res = runPlinth([baseUrl, "--device", "iphone-16-pro", "--scroll", "--out", out]);
+  assert.equal(res.code, 0, res.out);
+  assert.match(res.out, /content matches the capture pixel-for-pixel — ok/);
+  const frame0 = path.join(dir, "band-frame0.png");
+  const ff = spawnSync("ffmpeg", ["-loglevel", "error", "-y", "-i", out, "-frames:v", "1", frame0]);
+  assert.equal(ff.status, 0, String(ff.stderr));
+  const img = decodePng(readFileSync(frame0));
+  // The video is scaled to even dims, so sample by fraction of the frame:
+  // the band left of the home indicator, 20pt above the screen bottom.
+  const size = frameSize(d);
+  const at = (ptX, ptY) => getPixel(img, Math.round((PAD + d.bezel + ptX) / (size.width + 2 * PAD) * img.width),
+    Math.round((PAD + d.bezel + ptY) / (size.height + 2 * PAD) * img.height));
+  // First screen ends in the red hero; the page itself ends in green.
+  const band = at(30, d.pt.height - 17);
+  assert.ok(colorDistance(band, [34, 197, 94, 255]) > 80, `bottom band ${band} continues the page end (green), not the first screen`);
+});
+
+test("--scroll writes a GIF for an upper-case .GIF path", ffOpts, () => {
+  const out = path.join(dir, "demo.GIF");
+  const res = runPlinth([baseUrl, "--device", "iphone-16-pro", "--scroll", "--out", out]);
+  assert.equal(res.code, 0, res.out);
+  assert.equal(readFileSync(out).subarray(0, 4).toString(), "GIF8");
+});
+
+test("an ffmpeg failure mid-encode exits 3 with its message and leaves no output", opts, () => {
+  const bin = path.join(dir, "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const fake = path.join(bin, "ffmpeg");
+  writeFileSync(fake, '#!/bin/sh\n[ "$1" = "-version" ] && exit 0\necho "encoder exploded" >&2\nexit 1\n');
+  chmodSync(fake, 0o755);
+  const out = path.join(dir, "broken.mp4");
+  const res = runPlinth([baseUrl, "--scroll", "--out", out], { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+  assert.equal(res.code, 3, res.out);
+  assert.match(res.out, /ffmpeg failed: encoder exploded/);
+  assert.doesNotMatch(res.out, /node:events|EPIPE|at .*\(/);
+  assert.ok(!existsSync(out));
 });
