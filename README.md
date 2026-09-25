@@ -15,6 +15,7 @@ and any scripts it ships.
 | --- | --- |
 | [chip](skills/chip/) | Pushes agents toward the smallest responsible step: plan small revertable increments, state blast radius, and a `chip-check` CLI + GitHub Action that fails loudly until the work is chipped. |
 | [scrub](skills/scrub/) | Frame-by-frame UI animation inspection: drop a screen recording or GIF in chat and the agent gets stamped contact sheets, diff images, and a per-frame motion table to reason about timing, easing, and jank. Needs ffmpeg. |
+| [bezel](skills/bezel/) | Device-framed, DPR-correct screenshots of a running app or URL (phone/tablet/laptop/browser frames, generated CSS, no vendor artwork) with self-verifying dimensions and alignment; optional scrolled mp4/gif. Needs Chrome; ffmpeg for video. |
 
 ## Installing a skill
 
