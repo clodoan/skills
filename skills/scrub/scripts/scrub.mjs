@@ -20,8 +20,13 @@ import process from "node:process";
 const EXIT_OK = 0;
 const EXIT_ERR = 2;
 
-const DIFF_THRESHOLD = 24; // 0-255 luma delta that counts as "changed"
-const NOISE_FRACTION = 0.0004; // changed-pixel fraction below which a frame is "still"
+const STRONG_THRESHOLD = 24; // 0-255 luma delta that counts as "changed" (bbox, changed_px)
+// A row with only faint change (fades) counts as motion when it lasts
+// FAINT_RUN rows, changes FAINT_PX_FACTOR x --min-px pixels, and fills its
+// bbox densely. Codec noise is short-lived, small, or scattered.
+const FAINT_RUN = 3;
+const FAINT_PX_FACTOR = 10;
+const FAINT_MIN_DENSITY = 0.05;
 const TRIM_PAD_FRAMES = 3;
 const CROP_MAX_COVERAGE = 0.85; // skip cropping when motion covers most of the frame
 const UPSCALE_TARGET = 320; // upscale crops until min dimension reaches this
@@ -50,6 +55,8 @@ Options:
   --max-frames <n>    Cap on frames in dense sheets (default 96)
   --pad <px>          Padding around the motion crop (default 24)
   --no-crop           Analyze the full frame, skip motion cropping
+  --min-px <n>        Changed pixels a frame needs to count as motion (default 20)
+  --threshold <n>     Luma delta for faint change such as fades (default 8, max 24)
   --keep-work         Keep intermediate files in work/
   -h, --help          Show this help`;
 }
@@ -57,7 +64,7 @@ Options:
 function parseArgs(argv) {
   const opts = {
     input: null, out: null, fps: null, grid: 4,
-    maxFrames: 96, pad: 24, crop: true, keepWork: false,
+    maxFrames: 96, pad: 24, crop: true, keepWork: false, minPx: 20, threshold: 8,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -77,6 +84,11 @@ function parseArgs(argv) {
       case "--grid": opts.grid = nextInt(); break;
       case "--max-frames": opts.maxFrames = nextInt(); break;
       case "--pad": opts.pad = nextInt(); break;
+      case "--min-px": opts.minPx = nextInt(); break;
+      case "--threshold":
+        opts.threshold = nextInt();
+        if (opts.threshold > STRONG_THRESHOLD) throw new UsageError(`--threshold must be at most ${STRONG_THRESHOLD}`);
+        break;
       case "--no-crop": opts.crop = false; break;
       case "--keep-work": opts.keepWork = true; break;
       case "-h":
@@ -216,21 +228,30 @@ function normalize(input, fps, outDir) {
   return Number(count);
 }
 
-// One decode pass: per-transition motion bbox + changed-pixel fraction.
-// Output frame k of tblend is the difference between normalized frames
-// k and k+1, so row k describes motion arriving AT frame k+1.
-function motionPass(outDir) {
-  const metaFile = path.join("work", "motion-meta.txt");
-  workFiles.push(path.join(outDir, metaFile));
-  const chain =
-    `format=gray,tblend=all_mode=difference,` +
-    `lut=y=if(gt(val\\,${DIFF_THRESHOLD})\\,255\\,0),` +
-    `bbox=min_val=1,signalstats,metadata=mode=print:file=${metaFile}`;
-  run("ffmpeg", ["-y", "-loglevel", "error", "-i", NORMALIZED, "-vf", chain, "-f", "null", "-"], outDir);
+// One decode pass, two thresholds: per-transition motion bbox + changed-
+// pixel fraction. Output frame k of tblend is the difference between
+// normalized frames k and k+1, so row k describes motion arriving AT
+// frame k+1.
+function motionPass(outDir, threshold) {
+  const strongFile = path.join("work", "motion-strong.txt");
+  const faintFile = path.join("work", "motion-faint.txt");
+  workFiles.push(path.join(outDir, strongFile), path.join(outDir, faintFile));
+  const branch = (label, t, file) =>
+    `[${label}]lut=y=if(gt(val\\,${t})\\,255\\,0),bbox=min_val=1,signalstats,metadata=mode=print:file=${file}[${label}o]`;
+  const graph = `[0:v]format=gray,tblend=all_mode=difference,split[s][f];` +
+    `${branch("s", STRONG_THRESHOLD, strongFile)};${branch("f", threshold, faintFile)}`;
+  run("ffmpeg", [
+    "-y", "-loglevel", "error", "-i", NORMALIZED, "-filter_complex", graph,
+    "-map", "[so]", "-f", "null", "-", "-map", "[fo]", "-f", "null", "-",
+  ], outDir);
+  const faint = new Map(parseMetadata(path.join(outDir, faintFile)).map((r) => [r.k, r]));
+  return parseMetadata(path.join(outDir, strongFile)).map((r) => ({ ...r, faint: faint.get(r.k) }));
+}
 
+function parseMetadata(file) {
   const rows = [];
   let current = null;
-  for (const line of readFileSync(path.join(outDir, metaFile), "utf8").split("\n")) {
+  for (const line of readFileSync(file, "utf8").split("\n")) {
     const frameHead = line.match(/^frame:(\d+)\s/);
     if (frameHead) {
       if (current) rows.push(current);
@@ -252,17 +273,33 @@ function motionPass(outDir) {
   return rows;
 }
 
-function analyzeMotion(rows, meta, totalFrames, fps) {
+function analyzeMotion(rows, meta, totalFrames, fps, minPx) {
   const pixels = meta.width * meta.height;
-  const noiseFloor = Math.max(30, pixels * NOISE_FRACTION);
+  const box = (b) => (b && Number.isFinite(b.x1) ? b : null);
   const table = rows.map((r) => ({
     frame: r.k + 1, // motion arrives at this normalized frame
     ms: Math.round(((r.k + 1) * 1000) / fps),
     changedPx: Math.round(r.changedFrac * pixels),
-    bbox: r.bbox && Number.isFinite(r.bbox.x1) ? r.bbox : null,
+    faintPx: Math.round((r.faint?.changedFrac ?? 0) * pixels),
+    bbox: box(r.bbox),
+    faintBbox: box(r.faint?.bbox),
+    active: false,
   }));
 
-  const active = table.filter((r) => r.changedPx >= noiseFloor && r.bbox);
+  // Strong rows count on their own; faint-only rows need a run.
+  const isFaint = (r) => r.faintBbox && r.faintPx >= FAINT_PX_FACTOR * minPx &&
+    r.faintPx >= FAINT_MIN_DENSITY * r.faintBbox.w * r.faintBbox.h;
+  const isStrong = (r) => r.bbox && r.changedPx >= minPx;
+  for (let i = 0; i < table.length;) {
+    let j = i;
+    while (j < table.length && isFaint(table[j])) j++;
+    if (j - i >= FAINT_RUN) {
+      for (const r of table.slice(i, j)) if (!isStrong(r)) Object.assign(r, { active: true, bbox: r.faintBbox });
+    }
+    i = Math.max(j, i + 1);
+  }
+  for (const r of table) if (isStrong(r)) r.active = true;
+  const active = table.filter((r) => r.active);
   if (active.length === 0) {
     return { table, active, start: 0, end: totalFrames - 1, union: null, trimmed: false };
   }
@@ -399,14 +436,14 @@ function sheetFrameList(sheets, grid, ms) {
 }
 
 function writeCsv(outDir, table) {
-  const lines = ["frame,ms,x,y,w,h,cx,cy,changed_px"];
+  const lines = ["frame,ms,x,y,w,h,cx,cy,changed_px,faint_px"];
   for (const r of table) {
     const b = r.bbox;
     lines.push([
       r.frame, r.ms,
       b ? b.x1 : "", b ? b.y1 : "", b ? b.w : "", b ? b.h : "",
       b ? Math.round((b.x1 + b.x2) / 2) : "", b ? Math.round((b.y1 + b.y2) / 2) : "",
-      r.changedPx,
+      r.changedPx, r.faintPx,
     ].join(","));
   }
   writeFileSync(path.join(outDir, "motion.csv"), lines.join("\n") + "\n");
@@ -458,18 +495,23 @@ function markdownTable(table, motion, maxRows = 36) {
   const stride = Math.max(1, Math.ceil(rows.length / maxRows));
   const sampled = rows.filter((_, i) => i % stride === 0);
   const lines = [
-    "| frame | ms | bbox x,y | bbox w×h | center | changed px |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| frame | ms | bbox x,y | bbox w×h | center | changed px | faint px |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
   ];
   for (const r of sampled) {
     const b = r.bbox;
     lines.push(
       `| ${r.frame} | ${r.ms} | ${b ? `${b.x1},${b.y1}` : "—"} | ${b ? `${b.w}×${b.h}` : "—"} | ` +
-      `${b ? `${Math.round((b.x1 + b.x2) / 2)},${Math.round((b.y1 + b.y2) / 2)}` : "—"} | ${r.changedPx} |`,
+      `${b ? `${Math.round((b.x1 + b.x2) / 2)},${Math.round((b.y1 + b.y2) / 2)}` : "—"} | ${r.changedPx} | ${r.faintPx} |`,
     );
   }
   if (stride > 1) lines.push("", `(every ${stride}th row shown — full data in motion.csv)`);
   return lines.join("\n");
+}
+
+function peakChange(active) {
+  const peak = active.reduce((a, b) => (b.faintPx > a.faintPx ? b : a));
+  return `frame ${peak.frame} (${peak.changedPx} px changed, ${peak.faintPx} incl. faint)`;
 }
 
 function writeIndex(ctx) {
@@ -496,7 +538,7 @@ All frame numbers and milliseconds refer to the normalized clip
 
 ${noMotion ? "**No motion detected** above the noise floor. The clip appears static; only the overview sheet was generated." : `- **Active window:** frames ${motion.start}–${motion.end} (${ms(motion.start)}–${ms(motion.end)} ms)${motion.trimmed ? " — still head/tail trimmed automatically" : " — motion spans the whole clip"}
 - **Motion crop:** ${crop ? `x=${crop.x} y=${crop.y} ${crop.w}×${crop.h}px${crop.scale > 1 ? `, upscaled ${crop.scale}x for legibility (divide sheet px by ${crop.scale})` : ""}` : "none (motion covers most of the frame or --no-crop)"}
-- **Peak change:** frame ${motion.active.reduce((a, b) => (b.changedPx > a.changedPx ? b : a)).frame} (${motion.active.reduce((a, b) => (b.changedPx > a.changedPx ? b : a)).changedPx} px changed)
+- **Peak change:** ${peakChange(motion.active)}
 - **Dense sampling:** ${dense.strategy}, ${dense.frames.length} frames across ${sheetsCount} sheet(s)`}
 
 ## Files
@@ -554,8 +596,8 @@ function main() {
   }
 
   console.log(`  analyzing ${totalFrames} frames at ${fps} fps`);
-  const rows = motionPass(outDir);
-  const motion = analyzeMotion(rows, meta, totalFrames, fps);
+  const rows = motionPass(outDir, opts.threshold);
+  const motion = analyzeMotion(rows, meta, totalFrames, fps, opts.minPx);
   const crop = opts.crop && motion.active.length > 0 ? computeCrop(motion.union, opts.pad, meta) : null;
   const dense = motion.active.length > 0
     ? pickDenseFrames(motion.start, motion.end, motion.table, opts.maxFrames)

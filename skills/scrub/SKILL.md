@@ -65,8 +65,8 @@ spacing of the diff bars), overshoot/settle, holds or dropped frames
 
 ## When something looks off
 
-- Motion too small to crop or all-black diffs: re-run with `--no-crop`
-  and check the overview — the change may be a fade, not movement.
+- "No motion detected" but the overview shows change: re-run with
+  `--min-px 5` for tiny changes or `--threshold 4` for slow fades.
 - Multiple elements moving: the bbox is their union; read the sheets
   visually instead of trusting cx/cy.
 - Need exact frames beyond the sheets: extract from

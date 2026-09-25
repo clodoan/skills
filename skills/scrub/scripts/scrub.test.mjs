@@ -51,6 +51,28 @@ const FIXTURES = {
     "-filter_complex", "[0][1]overlay=x='20+6*clip(n-30\\,0\\,30)':y=160",
     "-pix_fmt", "yuv420p", out,
   ]),
+  // A 44px knob slides 40px in a large frame, arriving at frames 10–21;
+  // each row changes ~200px, well under the old 0.04%-of-frame floor.
+  "knob.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0xf0f0f0:s=1440x900:d=1:r=30",
+    "-f", "lavfi", "-i", "color=c=0x3478f6:s=44x44:d=1:r=30",
+    "-filter_complex", "[0][1]overlay=x='700+40*clip((n-10)/12\\,0\\,1)':y=450",
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  // A 200×120 card fades in over 200ms at 60fps (frames 19–30); each
+  // frame moves luma ~14 levels, under the 24-level "changed" threshold.
+  "fade.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "color=c=0x202020:s=640x400:d=1:r=60",
+    "-f", "lavfi", "-i", "color=c=0xe0e0e0:s=200x120:d=1:r=60,format=yuva420p,fade=t=in:st=0.3:d=0.2:alpha=1",
+    "-filter_complex", "[0][1]overlay=x=220:y=140",
+    "-pix_fmt", "yuv420p", out,
+  ]),
+  // A still frame encoded lossily with frequent keyframes: codec noise only.
+  "noisy.mp4": (out) => ffmpeg([
+    "-f", "lavfi", "-i", "testsrc2=s=960x600:r=60:d=2",
+    "-vf", "trim=end_frame=1,loop=loop=-1:size=1,trim=end_frame=120,setpts=N/60/TB",
+    "-c:v", "libx264", "-crf", "30", "-g", "30", "-pix_fmt", "yuv420p", out,
+  ]),
 };
 
 function fixture(name) {
@@ -262,4 +284,31 @@ test("falls back to unstamped sheets when ffmpeg cannot draw text", opts, () => 
   assert.match(index, /Cells are unstamped/);
   assert.match(index, /`sheets\/sheet-01.png`: f26 867ms, f27 900ms, /);
   assert.match(index, /`sheets\/sheet-03.png`: f58 1933ms, .*f62 2067ms\n/);
+});
+
+test("detects a small element moving in a large frame", opts, () => {
+  const outDir = scrubbed("knob.mp4");
+  assert.match(readIndex(outDir), /Active window:\*\* frames 6–24 /);
+  const rows = readCsv(outDir).filter((r) => r.cx !== null);
+  assert.deepEqual([rows[0].frame, rows.at(-1).frame], [10, 21]);
+});
+
+test("detects a fade through faint change", opts, () => {
+  const outDir = scrubbed("fade.mp4");
+  assert.match(readIndex(outDir), /Active window:\*\* frames 15–33 /);
+  const rows = readCsv(outDir).filter((r) => r.faint_px > 0);
+  assert.deepEqual([rows[0].frame, rows.at(-1).frame], [19, 30]);
+  assert.ok(rows.every((r) => r.changed_px === 0 && r.w === 200 && r.h === 120), JSON.stringify(rows[0]));
+});
+
+test("codec noise on a still frame is not motion", opts, () => {
+  assert.match(readIndex(scrubbed("noisy.mp4")), /No motion detected/);
+});
+
+test("--min-px and --threshold tune detection", opts, () => {
+  assert.match(readIndex(scrubbed("knob.mp4", ["--min-px", "1000"])), /No motion detected/);
+  assert.match(readIndex(scrubbed("fade.mp4", ["--threshold", "20"])), /No motion detected/);
+  const { code, out } = runScrub([fixture("still.mp4"), "--threshold", "30"]);
+  assert.equal(code, 2);
+  assert.match(out, /--threshold must be at most 24/);
 });

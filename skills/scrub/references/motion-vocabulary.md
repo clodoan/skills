@@ -23,14 +23,16 @@ covers the old and new position of whatever changed, so:
 - **Center fixed while `w×h` changes** means scale, pop, pulse, or
   rotation. **Center moving** means translation.
 - **`changed_px` without a moving center** means opacity, color, blur,
-  or a reveal. Slow fades can stay under the diff threshold and produce
-  no rows; check the sheets.
+  or a reveal. `changed_px` counts pixels whose luma moved more than 24
+  levels; `faint_px` counts those past `--threshold` (default 8). Fades
+  often show only in `faint_px`, or make `changed_px` alternate between
+  full and near-zero rows, so read `faint_px` for them. A fade slower
+  than the threshold per frame produces no rows; re-run with a lower
+  `--threshold`.
 - **A near-zero row in the middle of motion** is a hold. In clips that
   index.md marks as variable frame rate, normalization duplicates frames
-  to fill timestamp gaps, so a hold may come from the recorder. Fades
-  also alternate between full and near-zero rows because their
-  per-frame change sits near the diff threshold. Confirm on the sheets
-  before calling either jank.
+  to fill timestamp gaps, so a hold may come from the recorder. Confirm
+  on the sheets before calling it jank.
 
 ## Easing
 
@@ -73,7 +75,7 @@ covers the old and new position of whatever changed, so:
 
 | Term | Definition | In scrub output |
 | --- | --- | --- |
-| Fade in / Fade out | Element appears or disappears by changing opacity. | Bbox stays at the element's full box and center; only `changed_px` rises and falls. |
+| Fade in / Fade out | Element appears or disappears by changing opacity. | Bbox stays at the element's full box and center; only `faint_px` (and `changed_px`) rises and falls. |
 | Slide in | Element enters by sliding in from off-screen (left, right, top, or bottom). | Bbox starts at a frame edge and the center moves inward. |
 | Scale in | Element grows from smaller to full size as it appears, often paired with a fade. | Center fixed, `w×h` grows. |
 | Pop in | Element appears with a slight overshoot, like it bounces into place. | Scale in where `w×h` passes the final size, then shrinks back. |

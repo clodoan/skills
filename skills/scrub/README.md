@@ -88,6 +88,8 @@ skill (MIT).
 --max-frames <n>   cap on dense frames (default 96)
 --pad <px>         padding around the motion crop (default 24)
 --no-crop          keep the full frame
+--min-px <n>       changed pixels a frame needs to count as motion (default 20)
+--threshold <n>    luma delta for faint change such as fades (default 8, max 24)
 --keep-work        keep intermediate filter scripts and metadata
 ```
 
