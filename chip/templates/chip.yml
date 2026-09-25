@@ -1,0 +1,28 @@
+# chip — smallest responsible step check.
+# Copy to .github/workflows/chip.yml and point the `node` line at wherever
+# the chip skill is installed in your repo, e.g.:
+#   .claude/skills/chip/scripts/chip.mjs   (Claude Code project skills)
+#   .cursor/skills/chip/scripts/chip.mjs   (Cursor project skills)
+#   .agents/skills/chip/scripts/chip.mjs   (Cursor / Codex project skills)
+# Escape hatch: apply the `chip-override` PR label, or add a
+# `Chip-Override: <reason>` trailer to a commit in the PR.
+name: chip
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  chip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: chip — smallest responsible step
+        env:
+          CHIP_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'PR label: chip-override' || '' }}
+        run: |
+          node .agents/skills/chip/scripts/chip.mjs --base "origin/${GITHUB_BASE_REF}" --override "$CHIP_OVERRIDE"

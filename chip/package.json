@@ -1,0 +1,12 @@
+{
+  "name": "chip-skill",
+  "private": true,
+  "description": "Smallest-responsible-step check for the chip agent skill. Zero dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
