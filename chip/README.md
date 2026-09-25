@@ -105,7 +105,7 @@ jobs:
         env:
           # The chip-override label is the explicit escape hatch; an empty
           # value is ignored by the CLI.
-          CHIP_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'PR label: chip-override' || '' }}
+          CHIP_OVERRIDE: "${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'PR label: chip-override' || '' }}"
         run: |
           node chip/scripts/chip.mjs --base "origin/${GITHUB_BASE_REF}" --override "$CHIP_OVERRIDE"
 ```
