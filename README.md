@@ -70,8 +70,9 @@ One folder per skill under `skills/`, self-contained: `SKILL.md`
 (frontmatter `name` must match the folder name), `README.md`, and any
 `scripts/` with tests. Keep `SKILL.md` lean — skills cost context; put
 deep material in referenced files. Scripts should be dependency-light
-and runnable without an install step. PRs to this repo are expected to
-pass its own chip check.
+and run with plain `node`; a skill that needs packages (plinth) documents
+its one-time `npm install`. PRs to this repo are expected to pass its own
+chip check, which CI runs with the base branch's copy of the script.
 
 ## License
 

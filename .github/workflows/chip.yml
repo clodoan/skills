@@ -1,31 +1,43 @@
-# Dogfood: run the Chip check on this repo's own PRs, using the script
-# from the PR head. Downstream repos should copy
-# skills/chip/workflows/chip.yml instead (it fetches a pinned script).
+# Dogfood: run the Chip check on this repo's own PRs. The script comes
+# from the base branch, so a PR cannot relax the check it is judged by.
+# Downstream repos should copy skills/chip/workflows/chip.yml instead (it
+# fetches a pinned script).
 
 name: chip
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # labeled/unlabeled so toggling the chip-override label re-runs the check
+    # (every label event re-runs it: a job skipped by `if` reports success,
+    # which would let an unrelated label turn a failing check green);
+    # edited so a base-branch change re-runs it against the new base
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
   contents: read
+
+concurrency:
+  group: chip-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   chip:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: chip-check
         env:
           HAS_OVERRIDE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'true' || '' }}
           BASE_REF: ${{ github.base_ref }}
         run: |
+          script="$RUNNER_TEMP/chip-check.mjs"
+          git show "origin/${BASE_REF}:skills/chip/scripts/chip-check.mjs" > "$script"
           args=(--range "origin/${BASE_REF}...HEAD")
           if [ -n "$HAS_OVERRIDE_LABEL" ]; then
             args+=(--override "PR label: chip-override")
           fi
-          node skills/chip/scripts/chip-check.mjs "${args[@]}"
+          node "$script" "${args[@]}"
