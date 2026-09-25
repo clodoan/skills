@@ -24,23 +24,28 @@ is pixel-sharp) and composites it into a clean generated device frame.
 2. Capture:
 
    ```bash
-   node <path-to-skill>/scripts/plinth.mjs http://localhost:3000 --device iphone-15-pro
-   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --devices iphone-15-pro,macbook-14 --dark
-   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-15-pro --scroll --out demo.mp4
+   node <path-to-skill>/scripts/plinth.mjs http://localhost:3000 --device iphone-16-pro
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --mode safari
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --devices iphone-16-pro,macbook-14 --dark
+   node <path-to-skill>/scripts/plinth.mjs https://myapp.dev --device iphone-16-pro --scroll --out demo.mp4
    ```
 
-   Devices: `iphone-15-pro`, `pixel-8`, `ipad-pro-11`, `macbook-14`,
-   `browser`. Useful flags: `--dark` (page color scheme + dark studio
-   background), `--bg studio|studio-dark|sunset|ocean|none|<css>`,
-   `--frame light`, `--padding`, `--no-shadow`,
-   `--hide "<selector,selector>"` for cookie banners, `--wait <ms>` for
-   slow pages.
+   Devices: `iphone-16-pro`, `iphone-16`, `iphone-15-pro`, `pixel-8`,
+   `ipad-pro-11`, `macbook-14`, `browser`. Phone modes: `--mode
+   standalone` (default: status bar + home indicator, page captured
+   inside the safe area so nothing sits under the Dynamic Island) |
+   `safari` (mobile Safari with compact bottom bar) | `bare`
+   (full-bleed). Other flags: `--status light|dark` overrides the
+   luminance-based status bar scheme, `--buttons`, `--dark`,
+   `--bg <preset|css>`, `--frame light`, `--padding`, `--no-shadow`,
+   `--hide "<selector,selector>"`, `--wait <ms>`.
 
 3. **Trust the checks, and say what they said.** Every single-device run
-   verifies itself and prints `check:` lines: capture is DPR-exact,
-   output dimensions match the device spec, and frame alignment via
-   pixel sampling. Exit 1 means a check failed — do not hand the image
-   over; re-run with `--wait` higher or report the failure.
+   verifies itself and prints `check:` lines: safe-area capture is
+   DPR-exact, output dimensions match the device spec, frame alignment,
+   the Dynamic Island is solid black at its spec position, and the home
+   indicator is present. Exit 1 means a check failed — do not hand the
+   image over; re-run with `--wait` higher or report the failure.
 
 4. Look at the output image before delivering it. Real pages have real
    problems: cookie banners (`--hide`), unseeded/empty states, fonts
