@@ -51,6 +51,7 @@ const RISKY_DEFAULTS = {
     /\.d\.ts$/,
     /(^|\/)(package\.json|pyproject\.toml|Cargo\.toml|go\.mod)$/,
   ],
+  config: [/^chip\.config\.json$/],
   ci: [
     /^\.github\/workflows\//,
     /^\.gitlab-ci\.yml$/,
@@ -65,13 +66,14 @@ const RISKY_LABELS = {
   lockfile: "lockfile / dependency change",
   migration: "migration",
   publicApi: "public API / package manifest",
+  config: "chip config",
   ci: "CI config",
 };
 
 // Risky categories that must ship (nearly) alone. publicApi is
 // report-only: touching an export surface alongside its implementation
 // is a normal small step.
-const SHIP_ALONE = ["lockfile", "migration", "ci"];
+const SHIP_ALONE = ["lockfile", "migration", "config", "ci"];
 
 // Key at line start, any case; the reason must be on the same line.
 const OVERRIDE_TRAILER = /^chip-override:[ \t]*(\S.*)$/im;
@@ -163,38 +165,105 @@ function tryGit(cwd, args) {
 // Diff flags that ignore user config (diff.renames, external diff, textconv).
 const DIFF_FLAGS = ["--numstat", "-z", "-M", "--no-ext-diff", "--no-textconv", "--no-color"];
 
-function shallowHint(cwd) {
-  return tryGit(cwd, ["rev-parse", "--is-shallow-repository"]) === "true"
-    ? " This is a shallow clone; fetch full history (actions/checkout: fetch-depth: 0)."
-    : "";
+function resolveMergeBase(cwd, left, right) {
+  for (const ref of [left, right]) {
+    if (tryGit(cwd, ["rev-parse", "--verify", "-q", `${ref}^{commit}`]) === null) {
+      throw new UsageError(`unknown ref: ${ref}`);
+    }
+  }
+  const mergeBase = tryGit(cwd, ["merge-base", left, right]);
+  if (mergeBase) return mergeBase;
+  const shallow = tryGit(cwd, ["rev-parse", "--is-shallow-repository"]) === "true";
+  throw new GitError(
+    `no merge base between ${left} and ${right}.` +
+      (shallow ? " This is a shallow clone; fetch full history (actions/checkout: fetch-depth: 0)." : ""),
+  );
 }
 
+// Like .gitignore: a pattern without "/" matches at any depth; others are
+// anchored at the repo root. Supports *, **, ? and {a,b}.
 function globToRegExp(glob) {
+  const anchored = glob.includes("/") ? glob.replace(/^\//, "") : `**/${glob}`;
+  return new RegExp(`^${globBody(anchored)}$`);
+}
+
+function globBody(glob) {
   let out = "";
   let i = 0;
   while (i < glob.length) {
+    const close = glob[i] === "{" ? glob.indexOf("}", i) : -1;
     if (glob.startsWith("**/", i)) { out += "(?:.*/)?"; i += 3; }
     else if (glob.startsWith("**", i)) { out += ".*"; i += 2; }
     else if (glob[i] === "*") { out += "[^/]*"; i += 1; }
     else if (glob[i] === "?") { out += "[^/]"; i += 1; }
+    else if (close > i) { out += `(?:${glob.slice(i + 1, close).split(",").map(globBody).join("|")})`; i = close + 1; }
     else { out += glob[i].replace(/[.+^${}()|[\]\\]/g, "\\$&"); i += 1; }
   }
-  return new RegExp(`^${out}$`);
+  return out;
 }
 
-function loadConfig(opts, repoRoot) {
-  let file = opts.config;
-  if (!file) {
-    const candidate = path.join(repoRoot, "chip.config.json");
-    if (existsSync(candidate)) file = candidate;
-  } else if (!existsSync(file)) {
-    throw new UsageError(`config file not found: ${file}`);
-  }
-  const user = file ? JSON.parse(readFileSync(file, "utf8")) : {};
+const CONFIG_FILE = "chip.config.json";
+const NUMBER_KEYS = ["maxLines", "maxFiles", "maxAreas", "riskyCompanionLines"];
+const LIST_KEYS = ["areaRoots", "ignore"];
 
-  const config = { ...DEFAULTS, ...user };
-  config.areaRoots = user.areaRoots ?? DEFAULTS.areaRoots;
-  config.ignoreRes = (user.ignore ?? DEFAULTS.ignore).map(globToRegExp);
+// --config wins (the caller chose it). A --range check reads the config at
+// the range's merge base so a PR cannot relax its own budgets; working-tree
+// mode reads the working tree.
+function readConfigSource(opts, repoRoot, configRev) {
+  if (opts.config) {
+    const file = path.resolve(opts.cwd, opts.config);
+    if (!existsSync(file)) throw new UsageError(`config file not found: ${file}`);
+    return { label: file, text: readFileSync(file, "utf8") };
+  }
+  if (configRev) {
+    const at = configRev.slice(0, 12);
+    const text = tryGit(repoRoot, ["show", `${configRev}:${CONFIG_FILE}`]);
+    return text === null
+      ? { label: `defaults (no ${CONFIG_FILE} at range base ${at})`, text: null }
+      : { label: `${CONFIG_FILE} at range base ${at}`, text };
+  }
+  const file = path.join(repoRoot, CONFIG_FILE);
+  return existsSync(file) ? { label: CONFIG_FILE, text: readFileSync(file, "utf8") } : { label: "defaults", text: null };
+}
+
+function validateConfig(user, label) {
+  const fail = (msg) => {
+    throw new UsageError(`${label}: ${msg}`);
+  };
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const isStrings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+  if (!isObject(user)) fail("must be a JSON object");
+  for (const [key, value] of Object.entries(user)) {
+    if (NUMBER_KEYS.includes(key)) {
+      if (!Number.isFinite(value) || value < 0) fail(`${key} must be a number >= 0`);
+    } else if (LIST_KEYS.includes(key)) {
+      if (!isStrings(value)) fail(`${key} must be an array of strings`);
+    } else if (key === "risky") {
+      if (!isObject(value)) fail("risky must be an object");
+      for (const [cat, globs] of Object.entries(value)) {
+        if (!(cat in RISKY_DEFAULTS)) fail(`unknown risky category "${cat}" (expected ${Object.keys(RISKY_DEFAULTS).join(", ")})`);
+        if (!isStrings(globs)) fail(`risky.${cat} must be an array of strings`);
+      }
+    } else {
+      fail(`unknown key "${key}"`);
+    }
+  }
+}
+
+function loadConfig(opts, repoRoot, configRev) {
+  const source = readConfigSource(opts, repoRoot, configRev);
+  let user = {};
+  if (source.text !== null) {
+    try {
+      user = JSON.parse(source.text);
+    } catch (err) {
+      throw new UsageError(`${source.label}: invalid JSON: ${err.message}`);
+    }
+    validateConfig(user, source.label);
+  }
+
+  const config = { ...DEFAULTS, ...user, label: source.label };
+  config.ignoreRes = config.ignore.map(globToRegExp);
   config.risky = {};
   for (const cat of Object.keys(RISKY_DEFAULTS)) {
     const extra = (user.risky?.[cat] ?? []).map(globToRegExp);
@@ -274,7 +343,8 @@ function categorize(filePath, risky) {
 }
 
 function analyze(files, config) {
-  const kept = files.filter((f) => !config.ignoreRes.some((re) => re.test(f.path)));
+  // ignore can never hide an edit to the budgets themselves.
+  const kept = files.filter((f) => f.path === CONFIG_FILE || !config.ignoreRes.some((re) => re.test(f.path)));
   for (const f of kept) {
     // A rename touches both sides: categorize and area-count the old path too.
     f.categories = [...new Set([f.path, f.oldPath].filter(Boolean).flatMap((p) => categorize(p, config.risky)))];
@@ -408,7 +478,7 @@ function suggestSplit(analysis, violations, config) {
 function formatReport(analysis, config, sourceLabel) {
   const out = [];
   const over = (n, budget) => (n > budget ? `${n} ! (budget ${budget})` : `${n} (budget ${budget})`);
-  out.push(`chip-check · ${sourceLabel}`);
+  out.push(`chip-check · ${sourceLabel} · config: ${config.label}`);
   out.push(
     `  lines changed: ${over(analysis.totalLines, config.maxLines)} · files: ${over(analysis.files.length, config.maxFiles)} · areas: ${over(analysis.areas.size, config.maxAreas)}`,
   );
@@ -426,6 +496,9 @@ function formatReport(analysis, config, sourceLabel) {
     for (const cat of riskyCats) {
       out.push(`    ${RISKY_LABELS[cat]}: ${analysis.riskyTouched[cat].map(fileLabel).join(", ")}`);
     }
+    if (analysis.riskyTouched.config) {
+      out.push(`    note: ${CONFIG_FILE} edits apply to --range (CI) checks only once they are on the base.`);
+    }
     if (analysis.riskyTouched.publicApi) {
       out.push("    note: public API / manifest files change your contract with callers — name this in the step's blast radius.");
     }
@@ -440,17 +513,18 @@ function main() {
   // Every git call runs from the root so paths are root-relative.
   const cwd = repoRoot;
 
-  const config = loadConfig(opts, repoRoot);
-
   let numstatArgs;
   let logRange;
   let sourceLabel;
+  let mergeBase;
   let includeUntracked = false;
 
   if (opts.range) {
     if (!opts.range.includes("..")) {
       throw new UsageError(`--range needs <a>..<b> or <a>...<b>, got "${opts.range}"; use --base for a single ref`);
     }
+    const [, left, right] = opts.range.match(/^(.*?)\.\.\.?(.*)$/);
+    mergeBase = resolveMergeBase(cwd, left || "HEAD", right || "HEAD");
     numstatArgs = ["diff", ...DIFF_FLAGS, opts.range];
     logRange = opts.range.replace("...", "..");
     sourceLabel = `range ${opts.range}`;
@@ -459,25 +533,15 @@ function main() {
     if (!base) {
       throw new UsageError("could not detect a base branch; pass --base <ref> or --range <a...b>");
     }
-    if (tryGit(cwd, ["rev-parse", "--verify", "-q", `${base}^{commit}`]) === null) {
-      throw new UsageError(`unknown base ref: ${base}`);
-    }
-    const mergeBase = tryGit(cwd, ["merge-base", base, "HEAD"]);
-    if (!mergeBase) throw new GitError(`no merge base between ${base} and HEAD.${shallowHint(cwd)}`);
+    mergeBase = resolveMergeBase(cwd, base, "HEAD");
     numstatArgs = ["diff", ...DIFF_FLAGS, mergeBase];
     logRange = `${mergeBase}..HEAD`;
     sourceLabel = `working tree vs ${base}`;
     includeUntracked = true;
   }
 
-  let numstat;
-  try {
-    numstat = git(cwd, numstatArgs);
-  } catch (err) {
-    if (err instanceof GitError) err.message += shallowHint(cwd);
-    throw err;
-  }
-  const files = parseNumstat(numstat);
+  const config = loadConfig(opts, repoRoot, opts.range ? mergeBase : null);
+  const files = parseNumstat(git(cwd, numstatArgs));
   if (includeUntracked) files.push(...collectUntracked(repoRoot));
 
   const analysis = analyze(files, config);

@@ -331,11 +331,11 @@ test("untracked names with leading spaces and symlinks count like git would", (t
   assert.match(out, /401 lines changed/);
 });
 
-test("git failures exit 2 with a one-line message, not a stack trace", (t) => {
+test("an unknown ref exits 2 with a one-line message, not a stack trace", (t) => {
   const repo = makeRepo(t);
   const { code, out } = runChip(repo, ["--range", "nope...HEAD"], { base: null });
   assert.equal(code, 2, out);
-  assert.match(out, /chip-check: git diff .* failed: fatal:/);
+  assert.match(out, /chip-check: unknown ref: nope/);
   assert.doesNotMatch(out, /\n\s+at /);
 });
 
@@ -353,4 +353,85 @@ test("a shallow clone without the merge base gets a fetch-depth hint", (t) => {
   const { code, out } = runChip(clone, ["--range", "origin/main...HEAD"], { base: null });
   assert.equal(code, 2, out);
   assert.match(out, /shallow clone.*fetch-depth: 0/);
+  assert.doesNotMatch(out, /\n\s+at /);
+});
+
+test("--range reads budgets from the range base, so a PR cannot relax its own check", (t) => {
+  const repo = makeRepo(t);
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/big.ts", lines(5000));
+  write(repo, "chip.config.json", JSON.stringify({ ignore: ["**"], maxLines: 99999 }));
+  commit(repo, "innocent");
+  const { code, out } = runChip(repo, ["--range", "main...HEAD"], { base: null });
+  assert.equal(code, 1, out);
+  assert.match(out, /config: defaults \(no chip\.config\.json at range base/);
+  assert.match(out, /5001 lines changed — budget is 300/);
+  assert.match(out, /chip config touched \(chip\.config\.json\)/);
+});
+
+test("--range applies the base's chip.config.json", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "chip.config.json", JSON.stringify({ maxLines: 10 }));
+  commit(repo, "config on main");
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/a.ts", lines(20));
+  commit(repo, "feature");
+  const { code, out } = runChip(repo, ["--range", "main...HEAD"], { base: null });
+  assert.equal(code, 1, out);
+  assert.match(out, /config: chip\.config\.json at range base [0-9a-f]+/);
+  assert.match(out, /budget is 10/);
+});
+
+test("a budget edit rides alone: chip.config.json plus code fails in working-tree mode", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "chip.config.json", JSON.stringify({ maxLines: 1000 }));
+  write(repo, "src/a.ts", lines(200));
+  const { code, out } = runChip(repo);
+  assert.equal(code, 1, out);
+  assert.match(out, /chip config touched \(chip\.config\.json\) alongside 200 other lines/);
+});
+
+for (const [name, contents, message] of [
+  ["unknown key", { maxLine: 10 }, /chip\.config\.json: unknown key "maxLine"/],
+  ["non-array ignore", { ignore: "**/*.snap" }, /ignore must be an array of strings/],
+  ["non-numeric budget", { maxLines: "abc" }, /maxLines must be a number >= 0/],
+  ["null budget", { maxLines: null }, /maxLines must be a number >= 0/],
+  ["unknown risky category", { risky: { lock: [] } }, /unknown risky category "lock"/],
+  ["invalid JSON", "{\"maxLines\": 10,}", /chip\.config\.json: invalid JSON/],
+]) {
+  test(`config validation: ${name} is a usage error`, (t) => {
+    const repo = makeRepo(t);
+    write(repo, "chip.config.json", typeof contents === "string" ? contents : JSON.stringify(contents));
+    const { code, out } = runChip(repo);
+    assert.equal(code, 2, out);
+    assert.match(out, message);
+  });
+}
+
+test("--config resolves relative to --cwd and is named in the report", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "strict.json", JSON.stringify({ maxLines: 5 }));
+  commit(repo, "strict");
+  write(repo, "a.ts", lines(20));
+  const res = spawnSync(process.execPath, [CLI, "--cwd", path.basename(repo), "--base", "main", "--config", "strict.json"], {
+    cwd: path.dirname(repo),
+    encoding: "utf8",
+  });
+  const out = res.stdout + res.stderr;
+  assert.equal(res.status, 1, out);
+  assert.match(out, /config: .*strict\.json/);
+  assert.match(out, /budget is 5/);
+});
+
+test("ignore globs follow .gitignore depth rules and support braces", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "chip.config.json", JSON.stringify({ ignore: ["*.snap", "src/**/*.{gen.ts,pb.go}"] }));
+  commit(repo, "config");
+  write(repo, "src/deep/x.snap", lines(900));
+  write(repo, "src/api/types.gen.ts", lines(900));
+  write(repo, "src/api/svc.pb.go", lines(900));
+  write(repo, "src/api/real.ts", lines(5));
+  const { code, out } = runChip(repo);
+  assert.equal(code, 0, out);
+  assert.match(out, /lines changed: 5 /);
 });
