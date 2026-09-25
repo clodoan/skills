@@ -402,6 +402,59 @@ test("react-router: path chains through a $-named config resolve", () => {
 
 const NEXT_PKG = `{"dependencies":{"next":"15"}}`;
 
+test("pages router: each file's links start at its own route", () => {
+  const root = makeApp("pagesedges", {
+    "package.json": NEXT_PKG,
+    "pages/index.tsx": `export default () => <a href="/about">a</a>`,
+    "pages/about.tsx": `export default () => <a href="/contact">c</a>`,
+    "pages/contact.tsx": `export default () => <a href="/">h</a>`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges.sort(), ["/ -link-> /about", "/about -link-> /contact", "/contact -link-> /"]);
+});
+
+test("layouts, error files, and colocated components are shared: hidden and counted, drawn with --include-shared", () => {
+  const root = makeApp("sharedsrc", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/layout.tsx": `export default () => <a href="/docs">docs</a>`,
+    "app/error.tsx": `export default () => <a href="/docs">docs</a>`,
+    "app/components/nav.tsx": `export const Nav = () => <a href="/docs">docs</a>`,
+    "app/docs/page.tsx": "x",
+  });
+  const hidden = runRamble(root);
+  assert.deepEqual(graph(hidden.mmd).edges, []);
+  assert.match(hidden.md, /Not drawn by design:\*\* 3 shared/);
+  assert.match(hidden.md, /`\/docs` at app\/components\/nav\.tsx:1/);
+  const shown = runRamble(root, ["--include-shared"]);
+  assert.deepEqual(graph(shown.mmd).edges, ["shared -link-> /docs"]);
+});
+
+test("react-router: links start at the route whose element component holds them", () => {
+  const root = makeApp("rrsources", {
+    "package.json": `{"dependencies":{"react-router-dom":"^6"}}`,
+    "src/router.tsx": `import { createBrowserRouter } from "react-router-dom";
+      import Home from "./pages/Home";
+      import { About as AboutPage } from "./pages/About";
+      const Team = lazy(() => import("./pages/Team"));
+      export const router = createBrowserRouter([
+        { path: "/", element: <Root />, children: [
+          { index: true, element: <Home /> },
+          { path: "about", element: <AboutPage /> },
+          { path: "team", element: <Team /> },
+        ]},
+      ]);`,
+    "src/pages/Home.tsx": `export default () => <Link to="/about">a</Link>`,
+    "src/pages/About.tsx": `export const About = () => <Link to="/team">t</Link>`,
+    "src/pages/Team.tsx": `export default () => { const navigate = useNavigate(); navigate("/"); }`,
+    "src/components/Nav.tsx": `export const Nav = () => <Link to="/team">t</Link>`,
+  });
+  const { code, out, mmd, md } = runRamble(root);
+  assert.equal(code, 0, out);
+  assert.deepEqual(graph(mmd).edges.sort(), ["/ -link-> /about", "/about -link-> /team", "/team -link-> /"]);
+  assert.match(md, /1 shared/);
+});
+
 test("a middleware redirect survives later quoted strings (config.matcher)", () => {
   const root = makeApp("mwmatcher", {
     "package.json": "{}",
@@ -416,6 +469,58 @@ test("a middleware redirect survives later quoted strings (config.matcher)", () 
   });
   const { mmd } = runRamble(root);
   assert.deepEqual(graph(mmd).edges, ["middleware -middleware-> /login"]);
+});
+
+test("proxy.ts (Next 16) is middleware; a redux middleware.ts in lib/ is not", () => {
+  const root = makeApp("proxy", {
+    "package.json": "{}",
+    "app/page.tsx": "x",
+    "app/login/page.tsx": "x",
+    "proxy.ts": `export function proxy(req) { return NextResponse.redirect(new URL("/login", req.url)); }`,
+    "lib/middleware.ts": `export const m = () => (next) => (action) => redirect("/login");`,
+  });
+  const { mmd, md } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, ["proxy -middleware-> /login"]);
+  assert.match(md, /`\/login` at lib\/middleware\.ts:1/);
+});
+
+test("the most specific route wins; optional catch-alls match their base path", () => {
+  const root = makeApp("specific", {
+    "package.json": "{}",
+    "app/[...slug]/page.tsx": "x",
+    "app/blog/[id]/page.tsx": "x",
+    "app/blog/new/page.tsx": "x",
+    "app/shop/[[...cat]]/page.tsx": "x",
+    "app/page.tsx": `export default () => <>
+      <Link href={\`/blog/\${id}\`}>b</Link>
+      <Link href="/blog/new">n</Link>
+      <Link href="/shop">s</Link>
+      <Link href="/shop/a/b">s2</Link>
+      <Link href="/about/team">cms</Link>
+    </>`,
+  });
+  const { mmd } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges.sort(), [
+    "/ -link-> /:slug*", "/ -link-> /blog/:id", "/ -link-> /blog/new", "/ -link-> /shop/:cat*?",
+  ]);
+});
+
+test("monorepo: links resolve only within their own app", () => {
+  const root = makeApp("mono", {
+    "package.json": `{"private":true}`,
+    "apps/web/package.json": NEXT_PKG,
+    "apps/web/middleware.ts": `export function middleware(req) { return NextResponse.redirect(new URL("/settings", req.url)); }`,
+    "apps/web/app/page.tsx": `export default () => <a href="/settings">s</a>`,
+    "apps/web/app/web-only/page.tsx": "x",
+    "apps/admin/package.json": NEXT_PKG,
+    "apps/admin/app/page.tsx": `export default () => <a href="/web-only">w</a>`,
+    "apps/admin/app/settings/page.tsx": "x",
+  });
+  const { mmd, md } = runRamble(root);
+  assert.deepEqual(graph(mmd).edges, []);
+  assert.match(md, /`\/web-only` at apps\/admin\/app\/page\.tsx:1 \(unmatched\)/);
+  assert.match(md, /`\/settings` at apps\/web\/app\/page\.tsx:1 \(unmatched\)/);
+  assert.match(md, /`\/settings` at apps\/web\/middleware\.ts:1 \(unmatched\)/);
 });
 
 test("every navigation call site is an edge or a categorized entry with file:line", () => {

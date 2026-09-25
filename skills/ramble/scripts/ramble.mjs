@@ -720,21 +720,48 @@ function normalizeTarget(raw) {
   return { value: t };
 }
 
-function routeMatcher(route) {
-  const pattern = route.urlPath
-    .split("/")
-    .map((seg) => {
-      if (seg.startsWith(":")) return seg.endsWith("*") || seg.endsWith("*?") ? ".+" : "[^/]+";
-      return seg.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    })
-    .join("/");
-  return new RegExp(`^${pattern}$`);
+// static < :param < :param* < :param*? — the most specific route wins.
+const segRank = (seg) => (!seg.startsWith(":") ? 0 : seg.endsWith("*?") ? 3 : seg.endsWith("*") ? 2 : 1);
+
+function compareSpecificity(a, b) {
+  const sa = a.urlPath.split("/").slice(1);
+  const sb = b.urlPath.split("/").slice(1);
+  for (let i = 0; i < Math.min(sa.length, sb.length); i++) {
+    const d = segRank(sa[i]) - segRank(sb[i]);
+    if (d) return d;
+  }
+  return sb.length - sa.length;
 }
 
-function makeResolver(routes) {
-  const exact = new Map(routes.map((r) => [r.urlPath, r]));
-  const matchers = routes.map((r) => ({ r, re: routeMatcher(r) }));
+function routeMatcher(route) {
+  if (route.urlPath === "/") return /^\/$/;
+  const parts = route.urlPath.split("/").slice(1).map((seg) =>
+    ["/" + seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "/[^/]+", "/.+", "(?:/.*)?"][segRank(seg)]);
+  return new RegExp(`^${parts.join("")}$`);
+}
+
+function routeTable(routes) {
+  const exact = new Map();
+  for (const r of routes) if (!exact.has(r.urlPath)) exact.set(r.urlPath, r);
+  const matchers = [...routes].sort(compareSpecificity).map((r) => ({ r, re: routeMatcher(r) }));
   return (value) => exact.get(value) ?? matchers.find(({ re }) => re.test(value))?.r ?? null;
+}
+
+/** Resolve within the source's app, then its project; only project-less files see every route. */
+function makeResolver(routes) {
+  const tables = new Map();
+  const tableFor = (key, pick) => {
+    if (!tables.has(key)) tables.set(key, routeTable(routes.filter(pick)));
+    return tables.get(key);
+  };
+  return (value, { app, project }) => {
+    if (app) {
+      const hit = tableFor(`app:${app}`, (r) => r.app === app)(value);
+      if (hit) return hit;
+    }
+    if (project) return tableFor(`project:${project}`, (r) => r.project === project)(value);
+    return tableFor("all", () => true)(value);
+  };
 }
 
 function makeSpecials(rootDir, nextProjects) {
@@ -750,20 +777,29 @@ function makeSpecials(rootDir, nextProjects) {
   };
 }
 
-function middlewareKind(file) {
-  return /(^|\/)middleware\.(js|ts)$/.test(file) ? { kind: "middleware", project: null } : null;
+/** "middleware" | "proxy" for a Next middleware file at a project root or its src/. */
+function middlewareKind(file, nextProjects) {
+  const m = path.basename(file).match(/^(middleware|proxy)\.(js|ts|mjs)$/);
+  if (!m) return null;
+  const dir = path.dirname(file);
+  const project = path.basename(dir) === "src" ? path.dirname(dir) : dir;
+  return nextProjects.includes(project) ? { kind: m[1], project } : null;
 }
 
 /**
  * Every navigation call site becomes an edge or a `dropped` entry with a
- * category — never neither.
+ * category — never neither. Sources are page files (app router), route
+ * files (pages router), and element component files (React Router);
+ * anything else is "shared".
  */
-function collectEdges({ rootDir, files, routes, includeShared, resolve, special }) {
-  const routeDirs = routes
-    .map((r) => ({ dir: path.dirname(r.file), route: r }))
-    .sort((a, b) => b.dir.length - a.dir.length);
-  const sourceRouteFor = (file) =>
-    routeDirs.find(({ dir, route }) => file === route.file || file.startsWith(dir + path.sep))?.route ?? null;
+function collectEdges({ rootDir, files, routes, includeShared, nextProjects, resolve, special }) {
+  const sourceByFile = new Map();
+  for (const r of routes) {
+    const src = "sourceFile" in r ? r.sourceFile : r.file;
+    if (src && !sourceByFile.has(src)) sourceByFile.set(src, r);
+  }
+  const projects = [...new Set(routes.map((r) => r.project))].sort((a, b) => b.length - a.length);
+  const projectOf = (file) => projects.find((p) => file.startsWith(p + path.sep)) ?? null;
 
   const edges = [];
   const dropped = [];
@@ -773,8 +809,9 @@ function collectEdges({ rootDir, files, routes, includeShared, resolve, special 
     const raw = readText(file);
     if (!raw) continue;
     const text = file.endsWith(".mdx") ? raw : stripComments(raw);
-    const owner = sourceRouteFor(file);
-    const mw = middlewareKind(file);
+    const owner = sourceByFile.get(file) ?? null;
+    const mw = middlewareKind(file, nextProjects);
+    const scope = { app: owner?.app ?? null, project: mw?.project ?? owner?.project ?? projectOf(file) };
     for (const site of NAV_SITES) {
       site.re.lastIndex = 0;
       let m;
@@ -791,7 +828,7 @@ function collectEdges({ rootDir, files, routes, includeShared, resolve, special 
         const target = normalizeTarget(lit);
         if (target.host) external.add(target.host);
         if (target.category) { drop(target.category, lit); continue; }
-        const resolved = resolve(target.value);
+        const resolved = resolve(target.value, scope);
         if (!resolved) { drop("unmatched", lit); continue; }
         let source = mw ? special(mw.kind, mw.project) : owner;
         if (!source) {
@@ -820,7 +857,7 @@ function collectConfigRedirects({ rootDir, resolve, special }) {
     let m;
     while ((m = re.exec(text))) {
       const target = normalizeTarget(m[2]);
-      const to = target.value ? resolve(target.value) : null;
+      const to = target.value ? resolve(target.value, { project: rootDir }) : null;
       if (to) edges.push({ source: special("middleware", null), target: to, kind: "config-redirect" });
     }
   }
@@ -939,7 +976,7 @@ function main() {
   const resolve = makeResolver(finalRoutes);
   const special = makeSpecials(rootDir, nextProjects);
   const nav = collectEdges({
-    rootDir, files, routes: finalRoutes, includeShared: opts.includeShared, resolve, special,
+    rootDir, files, routes: finalRoutes, includeShared: opts.includeShared, nextProjects, resolve, special,
   });
   const config = collectConfigRedirects({ rootDir, resolve, special });
   const edges = [...nav.edges, ...config.edges];
