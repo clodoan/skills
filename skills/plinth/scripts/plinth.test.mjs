@@ -387,3 +387,46 @@ test("--hide works on pages with a strict Content-Security-Policy", opts, () => 
   const bannerY = contentRect(d, "standalone").height - 34;
   assert.ok(colorDistance(pixelAt(img, d, d.pt.width / 2, bannerY), HERO) <= 8, "banner should be hidden");
 });
+
+/** null when equal, else a description of where the images differ. */
+function imageDiff(a, b, tol = 2) {
+  if (a.width !== b.width || a.height !== b.height) return `size ${a.width}×${a.height} vs ${b.width}×${b.height}`;
+  let n = 0, box = [Infinity, Infinity, 0, 0];
+  for (let y = 0; y < a.height; y++) {
+    for (let x = 0; x < a.width; x++) {
+      if (colorDistance(getPixel(a, x, y), getPixel(b, x, y)) <= tol) continue;
+      n++;
+      box = [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)];
+    }
+  }
+  return n ? `${n} px differ in box ${box.join(",")}` : null;
+}
+
+test("chrome shows only the host: no credentials, query, or fragment", opts, () => {
+  const plain = render("safari-plain", [baseUrl, "--device", "iphone-16-pro", "--mode", "safari"]);
+  const port = new URL(baseUrl).port;
+  const noisy = render("safari-noisy", [`http://user:s3cret@localhost:${port}/?token=abc#frag`, "--device", "iphone-16-pro", "--mode", "safari"]);
+  assert.equal(noisy.code, 0, noisy.out);
+  assert.equal(imageDiff(plain.img, noisy.img), null, "Safari pill shows more than the host");
+});
+
+test("URL text cannot inject markup into the frame", opts, () => {
+  const plain = browserShot();
+  const injected = render("injected", [`${baseUrl}/#<i style="position:fixed;inset:0;background:lime"></i>`, "--device", "browser"]);
+  assert.equal(injected.code, 0, injected.out);
+  assert.equal(imageDiff(plain.img, injected.img), null, "URL fragment changed the rendered chrome");
+});
+
+test("--bg accepts presets and CSS colors, rejects unknown names and markup", opts, () => {
+  const ok = render("bg-hex", [baseUrl, "--device", "iphone-16-pro", "--bg", "#123456"]);
+  assert.equal(ok.code, 0, ok.out);
+  assert.deepEqual(getPixel(ok.img, 2, 2), [0x12, 0x34, 0x56, 255]);
+
+  const typo = runPlinth([baseUrl, "--bg", "studo", "--out", path.join(dir, "bg-typo.png")]);
+  assert.equal(typo.code, 2, typo.out);
+  assert.match(typo.out, /--bg/);
+  assert.ok(!existsSync(path.join(dir, "bg-typo.png")));
+
+  const markup = runPlinth([baseUrl, "--bg", "red;}</style><h1>x</h1><style>", "--out", path.join(dir, "bg-inj.png")]);
+  assert.equal(markup.code, 2, markup.out);
+});

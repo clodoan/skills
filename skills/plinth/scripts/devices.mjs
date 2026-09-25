@@ -399,9 +399,8 @@ function safariBottomHtml(device, { domain, statusColor }) {
 }
 
 /** Chromium-style desktop window chrome (APPROX). */
-function browserChromeHtml(device, { url, theme }) {
+function browserChromeHtml(device, { domain, theme }) {
   const c = FRAME_COLORS[theme] ?? FRAME_COLORS.dark;
-  const domain = url.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   const tabText = theme === "dark" ? "#e6e6ea" : "#3a3a40";
   const tabBg = theme === "dark" ? "#3a3a41" : "#ffffff";
   const glyph = theme === "dark" ? "#a0a0a8" : "#6b6b74";
@@ -462,13 +461,14 @@ function macMenuBarHtml(device, { statusColor, domain }) {
  *                 video), already sized to contentRect
  *   bandColor / bottomColor — page background continuation behind chrome
  *   statusColor — "#ffffff" | "#000000" (from page luminance or override)
- *   indicatorColor, url, domain, frameTheme, buttons, mode
+ *   indicatorColor, domain (plain text; escaped here), frameTheme, buttons, mode
  */
 export function buildDeviceHtml(device, opts) {
   const {
     contentHtml, bandColor, bottomColor, statusColor, indicatorColor,
-    url = "", domain = "", frameTheme = "dark", buttons = false, mode = "standalone",
+    frameTheme = "dark", buttons = false, mode = "standalone",
   } = opts;
+  const domain = escapeHtml(opts.domain ?? "");
   const size = frameSize(device);
   const pt = device.pt;
 
@@ -514,7 +514,7 @@ export function buildDeviceHtml(device, opts) {
     case "browser": {
       const c = FRAME_COLORS[frameTheme] ?? FRAME_COLORS.dark;
       return `<div class="frame" style="width:${size.width}px;height:${size.height}px;border-radius:${device.outerRadius}px;overflow:hidden;background:${bandColor};border:1px solid ${c.bodyEdge};box-sizing:border-box">
-        ${browserChromeHtml(device, { url, theme: frameTheme })}
+        ${browserChromeHtml(device, { domain, theme: frameTheme })}
         <div style="position:relative;width:${pt.width}px;height:${pt.height}px">${contentHtml}</div>
       </div>`;
     }
@@ -523,6 +523,10 @@ export function buildDeviceHtml(device, opts) {
       throw new Error(`unhandled device kind: ${exhaustive}`);
     }
   }
+}
+
+export function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
 }
 
 export const BACKGROUNDS = {

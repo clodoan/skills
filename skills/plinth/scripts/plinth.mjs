@@ -124,12 +124,33 @@ function parseArgs(argv) {
     throw new UsageError("--status must be auto, light, or dark");
   }
   if (!(opts.frame in { dark: 1, light: 1 })) throw new UsageError("--frame must be dark or light");
+  if (opts.bg !== null && BG_UNSAFE.test(opts.bg)) throw new UsageError("--bg must be a preset or a CSS color/gradient");
   return opts;
 }
 
 function background(opts) {
   if (opts.bg) return BACKGROUNDS[opts.bg] ?? opts.bg;
   return opts.dark ? BACKGROUNDS["studio-dark"] : BACKGROUNDS.studio;
+}
+
+/** What browser chrome shows: host only — never credentials, path, or query. */
+function displayHost(url) {
+  const u = new URL(url);
+  return u.host || u.pathname.split("/").pop() || u.protocol;
+}
+
+// --bg is pasted into a CSS declaration: reject anything that could end
+// it, then (once a browser is up) anything the browser can't parse.
+const BG_UNSAFE = /[<>{};\\]|\/\*/;
+async function validateBackground(browser, opts) {
+  if (!opts.bg || opts.bg in BACKGROUNDS) return;
+  const page = await browser.newPage();
+  try {
+    if (await page.evaluate((v) => CSS.supports("background", v), opts.bg)) return;
+  } finally {
+    await page.close();
+  }
+  throw new UsageError(`--bg "${opts.bg}" is neither a preset (${Object.keys(BACKGROUNDS).join(", ")}) nor a CSS background`);
 }
 
 // Inter is embedded for the status bar / chrome text: SF Pro cannot be
@@ -210,8 +231,7 @@ function deviceHtmlFor(device, shot, analysis, opts, contentHtmlOverride) {
     bottomColor: analysis.bottom.color,
     statusColor,
     indicatorColor,
-    url: opts.url,
-    domain: opts.url.replace(/^https?:\/\//, "").replace(/\/.*$/, ""),
+    domain: displayHost(opts.url),
     frameTheme: opts.frame,
     buttons: opts.buttons,
     mode: opts.mode,
@@ -372,6 +392,7 @@ async function main() {
   const multi = opts.deviceIds.length > 1;
 
   await withBrowser(async (browser) => {
+    await validateBackground(browser, opts);
     if (opts.scroll) {
       if (multi) throw new UsageError("--scroll works with a single --device");
       const device = DEVICES[opts.deviceIds[0]];
