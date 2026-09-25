@@ -129,7 +129,7 @@ export const DEVICES = {
 // Safari iOS 18 compact bottom bar has no fixed published height (it is a
 // dynamic element). Drawn as a 50pt pill zone above the 34pt bottom safe
 // area. APPROX by design; documented in the README.
-export const SAFARI_BOTTOM_PILL = 50;
+const SAFARI_BOTTOM_PILL = 50;
 
 export function deviceList() {
   return Object.entries(DEVICES)
@@ -151,10 +151,6 @@ export function frameSize(device) {
       };
     case "browser":
       return { width: width + 2, height: height + device.tabStrip + device.toolbar + 2 };
-    default: {
-      const exhaustive = device.kind;
-      throw new Error(`unhandled device kind: ${exhaustive}`);
-    }
   }
 }
 
@@ -168,10 +164,6 @@ export function screenRect(device) {
       return { x: device.bezel + device.deck.overhang, y: device.bezel, ...device.pt };
     case "browser":
       return { x: 1, y: device.tabStrip + device.toolbar + 1, ...device.pt };
-    default: {
-      const exhaustive = device.kind;
-      throw new Error(`unhandled device kind: ${exhaustive}`);
-    }
   }
 }
 
@@ -203,10 +195,6 @@ export function contentRect(device, mode) {
       return { x: 0, y: device.menuBar, width, height: height - device.menuBar };
     case "browser":
       return { x: 0, y: 0, width, height };
-    default: {
-      const exhaustive = device.kind;
-      throw new Error(`unhandled device kind: ${exhaustive}`);
-    }
   }
 }
 
@@ -217,7 +205,7 @@ export function contentRect(device, mode) {
  * sampled superellipse is visually indistinguishable from the private
  * continuous-corner curve at these sizes.
  */
-export function squirclePath(w, h, r, dx = 0, dy = 0, samples = 16) {
+function squirclePath(w, h, r, dx = 0, dy = 0, samples = 16) {
   if (r <= 0) {
     return `M${dx},${dy} L${dx + w},${dy} L${dx + w},${dy + h} L${dx},${dy + h} Z`;
   }
@@ -262,7 +250,7 @@ const FRAME_COLORS = {
  * exactly — no gaps, no halos, and the mask anti-aliasing comes from the
  * SVG rasterizer. A 1.25pt outer stroke fakes the titanium edge highlight.
  */
-export function frameOverlaySvg(device, theme = "dark", { buttons = false } = {}) {
+function frameOverlaySvg(device, theme = "dark", { buttons = false } = {}) {
   const c = FRAME_COLORS[theme] ?? FRAME_COLORS.dark;
   const b = device.bezel;
   const size = frameSize(device);
@@ -311,7 +299,7 @@ export function frameOverlaySvg(device, theme = "dark", { buttons = false } = {}
  * redistributed; Inter is the closest freely-licensed metric match —
  * documented in the README).
  */
-export function statusBarSvg(device, { color, batteryLevel = 0.82 }) {
+function statusBarSvg(device, { color }) {
   const w = device.pt.width;
   const h = device.statusBar;
   const isl = device.island;
@@ -340,7 +328,7 @@ export function statusBarSvg(device, { color, batteryLevel = 0.82 }) {
     <g transform="translate(${glyphsCx + 13},${cy - 6.5})">
       <rect x="0" y="0" width="25" height="13" rx="4" fill="none" stroke="${color}" stroke-opacity="0.38" stroke-width="1"/>
       <path d="M 26.6 4.3 Q 28.2 6.5 26.6 8.7 Z" fill="${color}" fill-opacity="0.4"/>
-      <rect x="2" y="2" width="${21 * batteryLevel}" height="9" rx="2.4" fill="${color}"/>
+      <rect x="2" y="2" width="${21 * 0.82}" height="9" rx="2.4" fill="${color}"/>
     </g>`;
   const island = isl
     ? `<rect x="${(w - isl.width) / 2}" y="${isl.y}" width="${isl.width}" height="${isl.height}" rx="${isl.height / 2}" fill="#000"/>`
@@ -359,7 +347,7 @@ export function statusBarSvg(device, { color, batteryLevel = 0.82 }) {
 }
 
 /** Android-style status bar (Pixel). Metrics APPROX — see header. */
-export function androidStatusSvg(device, { color }) {
+function androidStatusSvg(device, { color }) {
   const w = device.pt.width;
   const h = device.statusBar;
   const cy = h / 2 + 2;
@@ -409,7 +397,7 @@ function browserChromeHtml(device, { domain, theme }) {
   const glyph = theme === "dark" ? "#a0a0a8" : "#6b6b74";
   return `
   <div style="height:${device.tabStrip}px;background:${c.bar};display:flex;align-items:flex-end;padding:0 14px;box-sizing:border-box">
-    <div style="display:flex;gap:8px;align-items:center;height:100%;padding-bottom:0;margin-right:14px;align-self:center">
+    <div style="display:flex;gap:8px;align-items:center;height:100%;margin-right:14px;align-self:center">
       <span style="width:12px;height:12px;border-radius:99px;background:#ff5f57"></span>
       <span style="width:12px;height:12px;border-radius:99px;background:#febc2e"></span>
       <span style="width:12px;height:12px;border-radius:99px;background:#28c840"></span>
@@ -421,7 +409,7 @@ function browserChromeHtml(device, { domain, theme }) {
   </div>
   <div style="height:${device.toolbar}px;background:${tabBg};display:flex;align-items:center;gap:12px;padding:0 14px;box-sizing:border-box;border-bottom:1px solid ${theme === "dark" ? "#26262b" : "#e4e4e9"}">
     <svg width="48" height="16" viewBox="0 0 48 16" fill="none" stroke="${glyph}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M 9 2 L 3 8 L 9 14"/><path d="M 3 8 L 13 8" opacity="0"/>
+      <path d="M 9 2 L 3 8 L 9 14"/>
       <path d="M 21 2 L 27 8 L 21 14" opacity="0.45"/>
       <path d="M 40 3 A 5.5 5.5 0 1 1 36 4.5"/><path d="M 36 1.5 L 36 5 L 39.5 5"/>
     </svg>
@@ -439,13 +427,13 @@ function macMenuBarHtml(device, { statusColor, domain }) {
   const text = dark ? "#ececf0" : "#2a2a30";
   const dim = dark ? "rgba(236,236,240,0.55)" : "rgba(42,42,48,0.55)";
   const n = device.notch;
-  const menus = ["", domain, "File", "Edit", "View", "Window", "Help"];
+  const menus = [domain, "File", "Edit", "View", "Window", "Help"];
   return `
   <div style="position:absolute;left:0;top:0;width:${device.pt.width}px;height:${device.menuBar}px;background:${bg};
       display:flex;align-items:center;padding:0 18px;box-sizing:border-box;gap:18px;
       font:13.5px/1 Inter,sans-serif;color:${dim}">
     <span style="width:15px;height:15px;border-radius:5px;background:${text};opacity:0.9"></span>
-    ${menus.slice(1).map((m, i) => `<span style="${i === 0 ? `font-weight:600;color:${text}` : ""}">${m}</span>`).join("")}
+    ${menus.map((m, i) => `<span style="${i === 0 ? `font-weight:600;color:${text}` : ""}">${m}</span>`).join("")}
     <span style="flex:1"></span>
     <svg width="17" height="13" viewBox="0 0 17 13" fill="none" stroke="${text}" stroke-width="1.8" stroke-linecap="round">
       <path d="M 2.2 4.8 A 9 9 0 0 1 14.8 4.8"/><path d="M 4.9 7.9 A 5.4 5.4 0 0 1 12.1 7.9"/>
@@ -521,10 +509,6 @@ export function buildDeviceHtml(device, opts) {
         <div style="position:relative;width:${pt.width}px;height:${pt.height}px">${contentHtml}</div>
       </div>`;
     }
-    default: {
-      const exhaustive = device.kind;
-      throw new Error(`unhandled device kind: ${exhaustive}`);
-    }
   }
 }
 
@@ -540,4 +524,3 @@ export const BACKGROUNDS = {
   none: "transparent",
 };
 
-export { FRAME_COLORS };

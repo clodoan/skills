@@ -7,6 +7,8 @@
 import { createRequire } from "node:module";
 import process from "node:process";
 
+import { pngSize } from "./png.mjs";
+
 const require = createRequire(import.meta.url);
 
 let chromium;
@@ -122,11 +124,8 @@ export async function capture(browser, url, opts) {
 
     await page.waitForTimeout(opts.waitMs ?? 800);
     const buffer = await page.screenshot({ type: "png", fullPage: Boolean(opts.fullPage) });
-    return {
-      buffer,
-      pxWidth: buffer.readUInt32BE(16),
-      pxHeight: buffer.readUInt32BE(20),
-    };
+    const { width, height } = pngSize(buffer);
+    return { buffer, pxWidth: width, pxHeight: height };
   } finally {
     await context.close();
   }
