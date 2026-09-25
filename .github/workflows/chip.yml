@@ -1,0 +1,31 @@
+# Dogfood: run the Chip check on this repo's own PRs, using the script
+# from the PR head. Downstream repos should copy
+# skills/chip/workflows/chip.yml instead (it fetches a pinned script).
+
+name: chip
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  chip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: chip-check
+        env:
+          HAS_OVERRIDE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'chip-override') && 'true' || '' }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          args=(--range "origin/${BASE_REF}...HEAD")
+          if [ -n "$HAS_OVERRIDE_LABEL" ]; then
+            args+=(--override "PR label: chip-override")
+          fi
+          node skills/chip/scripts/chip-check.mjs "${args[@]}"
