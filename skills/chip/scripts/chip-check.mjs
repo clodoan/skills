@@ -43,9 +43,10 @@ const DEFAULTS = {
 
 const RISKY_DEFAULTS = {
   lockfile: [
-    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|bun\.lock|deno\.lock|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|flake\.lock|packages\.lock\.json)$/,
+    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|bun\.lock|deno\.lock|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|Gemfile\.lock|composer\.lock|go\.sum|flake\.lock|packages\.lock\.json|Podfile\.lock|mix\.lock|pubspec\.lock|Package\.resolved|gradle\.lockfile)$/,
   ],
-  migration: [/(^|\/)migrations?\//i, /(^|\/)alembic\/versions\//],
+  // Prose under a migrations/ dir (guides, READMEs) is not a migration.
+  migration: [/(^|\/)migrations?\/(?!.*\.(md|mdx|rst|txt)$)/i, /(^|\/)alembic\/versions\//],
   publicApi: [
     /(^|\/)index\.(js|jsx|ts|tsx|mjs|cjs)$/,
     /\.d\.ts$/,
@@ -53,7 +54,7 @@ const RISKY_DEFAULTS = {
   ],
   config: [/^chip\.config\.json$/],
   ci: [
-    /^\.github\/workflows\//,
+    /^\.github\/(workflows|actions)\//,
     /^\.gitlab-ci\.yml$/,
     /^Jenkinsfile/,
     /^\.circleci\//,
@@ -264,6 +265,7 @@ function loadConfig(opts, repoRoot, configRev) {
 
   const config = { ...DEFAULTS, ...user, label: source.label };
   config.ignoreRes = config.ignore.map(globToRegExp);
+  config.areaRoots = config.areaRoots.map((r) => r.replace(/^\/+|\/+$/g, "")).sort((a, b) => b.length - a.length);
   config.risky = {};
   for (const cat of Object.keys(RISKY_DEFAULTS)) {
     const extra = (user.risky?.[cat] ?? []).map(globToRegExp);
@@ -323,10 +325,18 @@ function collectUntracked(repoRoot) {
   });
 }
 
+// Files directly at the repo root get their own row but no area budget:
+// a README or manifest touch should not make a step "two concerns".
+const ROOT_AREA = "(root)";
+
+// areaRoots are sorted longest first, so "frontend/apps" beats "frontend".
 function areaOf(filePath, areaRoots) {
   const parts = filePath.split("/");
-  if (parts.length === 1) return "(root)";
-  if (areaRoots.includes(parts[0]) && parts.length > 2) return `${parts[0]}/${parts[1]}`;
+  if (parts.length === 1) return ROOT_AREA;
+  for (const root of areaRoots) {
+    const rest = filePath.startsWith(`${root}/`) ? filePath.slice(root.length + 1).split("/") : [];
+    if (rest.length > 1) return `${root}/${rest[0]}`;
+  }
   return parts[0];
 }
 
@@ -373,12 +383,13 @@ function analyze(files, config) {
     if (touched.length > 0) riskyTouched[cat] = touched;
   }
 
-  return { files: kept, totalLines, areas, riskyTouched };
+  const countedAreas = [...areas.keys()].filter((a) => a !== ROOT_AREA);
+  return { files: kept, totalLines, areas, countedAreas, riskyTouched };
 }
 
 function evaluate(analysis, config) {
   const violations = [];
-  const { files, totalLines, areas, riskyTouched } = analysis;
+  const { files, totalLines, countedAreas, riskyTouched } = analysis;
 
   if (totalLines > config.maxLines) {
     violations.push({
@@ -392,10 +403,10 @@ function evaluate(analysis, config) {
       message: `${files.length} files touched — budget is ${config.maxFiles}.`,
     });
   }
-  if (areas.size > config.maxAreas) {
+  if (countedAreas.length > config.maxAreas) {
     violations.push({
       kind: "areas",
-      message: `${areas.size} areas touched (${[...areas.keys()].join(", ")}) — budget is ${config.maxAreas}. Several concerns are riding in one change.`,
+      message: `${countedAreas.length} areas touched (${countedAreas.join(", ")}) — budget is ${config.maxAreas}. Several concerns are riding in one change.`,
     });
   }
   for (const cat of SHIP_ALONE) {
@@ -457,16 +468,17 @@ function suggestSplit(analysis, violations, config) {
     .filter((a) => a.files.length > 0)
     .sort((a, b) => b.lines - a.lines);
 
-  if (byArea.length > 1) {
-    for (const a of byArea) {
-      const note = a.lines > config.maxLines ? " (still over budget — split by feature within the area)" : "";
-      lines.push(`  ${step}. ${a.area}: ${a.files.length} file(s), ~${a.lines} lines${note}`);
-      step += 1;
-    }
-  } else if (byArea.length === 1) {
+  const overBudget = (a) => a.lines > config.maxLines || a.files.length > config.maxFiles;
+  if (byArea.length === 1 && overBudget(byArea[0])) {
     lines.push(
       `  ${step}. ${byArea[0].area} alone is over budget. Split by concern: refactor-only step first (no behavior change), then the behavior change; or one feature slice at a time.`,
     );
+  } else {
+    for (const a of byArea) {
+      const note = overBudget(a) ? " (still over budget — split by feature within the area)" : "";
+      lines.push(`  ${step}. ${a.area}: ${a.files.length} file(s), ~${a.lines} lines${note}`);
+      step += 1;
+    }
   }
 
   lines.push("");
@@ -480,13 +492,14 @@ function formatReport(analysis, config, sourceLabel) {
   const over = (n, budget) => (n > budget ? `${n} ! (budget ${budget})` : `${n} (budget ${budget})`);
   out.push(`chip-check · ${sourceLabel} · config: ${config.label}`);
   out.push(
-    `  lines changed: ${over(analysis.totalLines, config.maxLines)} · files: ${over(analysis.files.length, config.maxFiles)} · areas: ${over(analysis.areas.size, config.maxAreas)}`,
+    `  lines changed: ${over(analysis.totalLines, config.maxLines)} · files: ${over(analysis.files.length, config.maxFiles)} · areas: ${over(analysis.countedAreas.length, config.maxAreas)}`,
   );
 
   if (analysis.areas.size > 0) {
     out.push("  areas:");
     for (const [area, stats] of [...analysis.areas.entries()].sort((a, b) => b[1].lines - a[1].lines)) {
-      out.push(`    ${area.padEnd(24)} ${String(stats.files).padStart(3)} file(s) ${String(stats.lines).padStart(6)} lines`);
+      const note = area === ROOT_AREA ? " (not counted as an area)" : "";
+      out.push(`    ${area.padEnd(24)} ${String(stats.files).padStart(3)} file(s) ${String(stats.lines).padStart(6)} lines${note}`);
     }
   }
 

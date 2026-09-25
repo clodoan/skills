@@ -435,3 +435,53 @@ test("ignore globs follow .gitignore depth rules and support braces", (t) => {
   assert.equal(code, 0, out);
   assert.match(out, /lines changed: 5 /);
 });
+
+test("root-level files do not count toward the area budget", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "src/a.ts", lines(10));
+  write(repo, "test/a.test.ts", lines(10));
+  write(repo, "CHANGELOG.md", "- fix\n");
+  const { code, out } = runChip(repo);
+  assert.equal(code, 0, out);
+  assert.match(out, /areas: 2 \(budget 2\)/);
+  assert.match(out, /\(root\) +1 file\(s\) +1 lines \(not counted as an area\)/);
+});
+
+test("areaRoots may be nested paths", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "chip.config.json", JSON.stringify({ areaRoots: ["frontend", "frontend/apps/"] }));
+  commit(repo, "config");
+  write(repo, "frontend/apps/a/x.ts", "1\n");
+  write(repo, "frontend/apps/b/y.ts", "2\n");
+  write(repo, "frontend/lib/z.ts", "3\n");
+  const { code, out } = runChip(repo);
+  assert.equal(code, 1, out);
+  assert.match(out, /3 areas touched \(frontend\/apps\/a, frontend\/apps\/b, frontend\/lib\)/);
+});
+
+test("risky patterns: migration guides are prose; more lockfiles and composite actions are covered", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "docs/migration/v2-upgrade-guide.md", lines(200));
+  write(repo, "ios/Podfile.lock", lines(3000, "pod"));
+  write(repo, ".github/actions/setup/action.yml", "runs: {}\n");
+  const { out } = runChip(repo);
+  assert.doesNotMatch(out, /migration:/);
+  assert.match(out, /lockfile \/ dependency change: ios\/Podfile\.lock/);
+  assert.match(out, /CI config: \.github\/actions\/setup\/action\.yml/);
+  assert.match(out, /lines changed: 201 /);
+});
+
+test("split advice only calls an area over budget when it is", (t) => {
+  let repo = makeRepo(t);
+  write(repo, "db/migrations/0001.sql", "create table users (id int);\n");
+  write(repo, "src/users.ts", lines(120));
+  let { out } = runChip(repo);
+  assert.match(out, /2\. src: 1 file\(s\), ~120 lines\n/);
+  assert.doesNotMatch(out, /alone is over budget/);
+
+  repo = makeRepo(t);
+  for (let i = 0; i < 13; i++) write(repo, `src/f${i}.ts`, "x\n");
+  write(repo, "docs/a.md", "y\n");
+  ({ out } = runChip(repo));
+  assert.match(out, /1\. src: 13 file\(s\), ~13 lines \(still over budget/);
+});
