@@ -73,7 +73,8 @@ const RISKY_LABELS = {
 // is a normal small step.
 const SHIP_ALONE = ["lockfile", "migration", "ci"];
 
-const OVERRIDE_TRAILER = /^Chip-Override:\s*(\S.*)$/m;
+// Key at line start, any case; the reason must be on the same line.
+const OVERRIDE_TRAILER = /^chip-override:[ \t]*(\S.*)$/im;
 
 function usage() {
   return `Usage: chip-check [options]
@@ -87,12 +88,13 @@ Options:
                       origin/main, origin/master, main, master).
   --range <a...b>     Check an explicit committed range instead of the
                       working tree (e.g. origin/main...HEAD in CI).
+                      Must contain ".." or "...".
   --config <path>     Path to config JSON. Default: chip.config.json at
                       the repo root, if present.
   --override <reason> Explicit escape hatch. Reports violations but
                       exits 0. The reason is required and printed.
-                      A "Chip-Override: <reason>" commit trailer in the
-                      checked range works the same way.
+                      A "Chip-Override: <reason>" line in the newest
+                      non-merge commit of the range works the same way.
   --cwd <dir>         Run as if started in <dir>.
   -h, --help          Show this help.
 
@@ -341,15 +343,27 @@ function evaluate(analysis, config) {
   return violations;
 }
 
-function findTrailerOverride(cwd, logRange) {
-  if (!logRange) return null;
-  const messages = tryGit(cwd, ["log", "--format=%B%x00", logRange]);
-  if (!messages) return null;
-  for (const body of messages.split("\0")) {
+// Only the newest non-merge commit can waive the check, so an override for
+// one commit does not silently cover everything pushed after it. In CI the
+// checkout is a merge ref, and the newest non-merge commit is the PR head.
+function findTrailerOverrides(cwd, logRange) {
+  const result = { honored: null, ignored: [] };
+  const out = tryGit(cwd, ["log", "--topo-order", "--format=%h%x1f%p%x1f%s%x1f%B%x1e", logRange]);
+  if (!out) return result;
+  let seenNonMerge = false;
+  for (const record of out.split("\x1e")) {
+    const [sha, parents, subject, body] = record.replace(/^\n/, "").split("\x1f");
+    if (!sha || body === undefined) continue;
+    const isMerge = parents.trim().includes(" ");
+    const isNewest = !isMerge && !seenNonMerge;
+    if (!isMerge) seenNonMerge = true;
     const m = body.match(OVERRIDE_TRAILER);
-    if (m) return m[1].trim();
+    if (!m) continue;
+    const entry = { sha, subject, reason: m[1].trim() };
+    if (isNewest) result.honored = entry;
+    else result.ignored.push(entry);
   }
-  return null;
+  return result;
 }
 
 function suggestSplit(analysis, violations, config) {
@@ -387,7 +401,7 @@ function suggestSplit(analysis, violations, config) {
 
   lines.push("");
   lines.push("Each step should pass chip-check on its own and be revertable on its own.");
-  lines.push('If this genuinely cannot be split (rare), override explicitly: add a "Chip-Override: <reason>" commit trailer or pass --override "<reason>". Overrides are loud on purpose.');
+  lines.push('If this genuinely cannot be split (rare), override explicitly: add a "Chip-Override: <reason>" line to the newest commit message or pass --override "<reason>". Overrides are loud on purpose.');
   return lines.join("\n");
 }
 
@@ -434,6 +448,9 @@ function main() {
   let includeUntracked = false;
 
   if (opts.range) {
+    if (!opts.range.includes("..")) {
+      throw new UsageError(`--range needs <a>..<b> or <a>...<b>, got "${opts.range}"; use --base for a single ref`);
+    }
     numstatArgs = ["diff", ...DIFF_FLAGS, opts.range];
     logRange = opts.range.replace("...", "..");
     sourceLabel = `range ${opts.range}`;
@@ -480,12 +497,20 @@ function main() {
   console.log("Suggested split:");
   console.log(suggestSplit(analysis, violations, config));
 
-  const override = opts.override ?? findTrailerOverride(cwd, logRange);
+  const trailers = findTrailerOverrides(cwd, logRange);
+  if (trailers.ignored.length > 0) console.log("");
+  for (const t of trailers.ignored) {
+    console.log(`Ignored Chip-Override on ${t.sha} "${t.subject}" (not on the newest commit).`);
+  }
+  const override = opts.override
+    ? { reason: opts.override, source: "--override flag" }
+    : trailers.honored && { reason: trailers.honored.reason, source: `commit ${trailers.honored.sha} "${trailers.honored.subject}"` };
   if (override) {
     console.log("");
     console.log("=".repeat(64));
     console.log(`OVERRIDE ACTIVE — budgets exceeded but explicitly waived.`);
-    console.log(`Reason: ${override}`);
+    console.log(`Reason: ${override.reason}`);
+    console.log(`Source: ${override.source}`);
     console.log("This is visible on purpose. Reviewers: treat with extra care.");
     console.log("=".repeat(64));
     process.exit(EXIT_PASS);

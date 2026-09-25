@@ -136,6 +136,64 @@ test("escape hatch: Chip-Override commit trailer turns fail into loud pass", (t)
   assert.match(out, /scaffolding a new repo/);
 });
 
+test("escape hatch: only the newest commit's override counts; older ones are listed as ignored", (t) => {
+  const repo = makeRepo(t);
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/a.ts", lines(50));
+  commit(repo, "rename thing\n\nChip-Override: mechanical rename of 50 lines");
+  for (const dir of ["api", "web", "infra"]) write(repo, `${dir}/x.ts`, lines(300));
+  commit(repo, "unrelated feature");
+  let res = runChip(repo);
+  assert.equal(res.code, 1, res.out);
+  assert.match(res.out, /Ignored Chip-Override on [0-9a-f]+ "rename thing" \(not on the newest commit\)/);
+  assert.doesNotMatch(res.out, /OVERRIDE ACTIVE/);
+  write(repo, "api/y.ts", "y\n");
+  commit(repo, "restate\n\nchip-override: restated for the whole branch");
+  res = runChip(repo);
+  assert.equal(res.code, 0, res.out);
+  assert.match(res.out, /Reason: restated for the whole branch\nSource: commit [0-9a-f]+ "restate"/);
+});
+
+test("escape hatch: an empty Chip-Override line does not borrow the next line", (t) => {
+  const repo = makeRepo(t);
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/big.ts", lines(500));
+  commit(repo, "big\n\nChip-Override:\nSigned-off-by: Dev <d@example.com>");
+  const { code, out } = runChip(repo);
+  assert.equal(code, 1, out);
+  assert.doesNotMatch(out, /OVERRIDE ACTIVE/);
+});
+
+test("escape hatch: in a CI merge checkout the PR head's override counts, base commits' do not", (t) => {
+  const repo = makeRepo(t);
+  write(repo, "a.ts", "a\n");
+  commit(repo, "main work\n\nChip-Override: waiver that belongs to main");
+  sh(repo, "git", ["checkout", "-q", "-b", "feature"]);
+  write(repo, "src/big.ts", lines(500));
+  commit(repo, "feature big");
+  sh(repo, "git", ["checkout", "-q", "main"]);
+  write(repo, "a.ts", "a\nmore\n");
+  commit(repo, "main moves");
+  sh(repo, "git", ["checkout", "-q", "--detach", "main"]);
+  sh(repo, "git", ["merge", "-q", "--no-ff", "feature", "-m", "Merge feature into main"]);
+  let res = runChip(repo, ["--range", "main...HEAD"], { base: null });
+  assert.equal(res.code, 1, res.out);
+  sh(repo, "git", ["checkout", "-q", "feature"]);
+  sh(repo, "git", ["commit", "-q", "--amend", "-m", "feature big\n\nChip-Override: generated fixtures"]);
+  sh(repo, "git", ["checkout", "-q", "--detach", "main"]);
+  sh(repo, "git", ["merge", "-q", "--no-ff", "feature", "-m", "Merge feature into main"]);
+  res = runChip(repo, ["--range", "main...HEAD"], { base: null });
+  assert.equal(res.code, 0, res.out);
+  assert.match(res.out, /Source: commit [0-9a-f]+ "feature big"/);
+});
+
+test("--range without .. is a usage error", (t) => {
+  const repo = makeRepo(t);
+  const { code, out } = runChip(repo, ["--range", "HEAD~0"], { base: null });
+  assert.equal(code, 2, out);
+  assert.match(out, /--range needs <a>\.\.<b>/);
+});
+
 test("escape hatch: --override flag with reason passes loudly", (t) => {
   const repo = makeRepo(t);
   write(repo, "src/big.ts", lines(500));
