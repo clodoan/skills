@@ -613,3 +613,15 @@ test("getPixel rejects coordinates outside the image", () => {
   assert.deepEqual(getPixel(img, 1, 1), [0, 0, 0, 0]);
   for (const [x, y] of [[2, 0], [0, -1], [0.5, 0], [NaN, 0]]) assert.throws(() => getPixel(img, x, y), RangeError);
 });
+
+test("dependencies are pinned to the tested versions and Node >= 20", () => {
+  const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+  assert.equal(pkg.engines?.node, ">=20"); // playwright-core 1.63 requires Node 20
+  for (const [name, version] of Object.entries(pkg.dependencies)) assert.match(version, /^\d+\.\d+\.\d+$/, `${name} is not pinned`);
+});
+
+test("ipad-pro-11 is labeled as the 834×1194pt 2018–2022 model", () => {
+  const d = DEVICES["ipad-pro-11"];
+  assert.deepEqual(d.pt, { width: 834, height: 1194 });
+  assert.match(d.label, /2018–2022/);
+});

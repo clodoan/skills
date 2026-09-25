@@ -17,9 +17,10 @@
  * [BJANGO] bjango.com/articles/designingmenubarextras — MacBook Pro 14/16"
  *          menu bar is 37pt tall at default scaling (wraps the camera
  *          housing); logical menu content stays 24pt.
- * [CREST]  crestnotch.app/macbook-notch-dimensions — 14" notch ≈185×32pt in
- *          the default mode (flagged "derived, not measured" there; we draw
- *          it flush with the 37pt bar).
+ * [CREST]  crestnotch.app/macbook-notch-dimensions — measured on the 16"
+ *          and derived for its default mode as ≈185×32pt; the 14" is listed
+ *          unverified. The 14" shares the 254ppi panel and 2x default
+ *          scale, so we reuse 185pt and draw it flush with the 37pt bar.
  * APPROX   marks values with no authoritative public source (Android chrome
  *          metrics, Safari's dynamic compact bar, iPad home-indicator bar
  *          width, browser chrome). They are drawn from screenshots of real
@@ -84,7 +85,9 @@ export const DEVICES = {
     bezel: 11,
   },
   "ipad-pro-11": {
-    label: 'iPad Pro 11" (834×1194pt @2x)',            // [UYL16-family][1440]
+    // 1st–4th gen geometry; the 2024 M4 model is 834×1210pt, but its
+    // safe areas and corner radius have no source as solid as [1440]/[DCR].
+    label: 'iPad Pro 11" 2018–2022 (834×1194pt @2x)',   // [1440]
     kind: "tablet",
     os: "ios",
     pt: { width: 834, height: 1194 },
