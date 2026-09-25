@@ -14,8 +14,7 @@ and any scripts it ships.
 | Skill | What it does |
 | --- | --- |
 | [chip](skills/chip/) | Pushes agents toward the smallest responsible step: plan small revertable increments, state blast radius, and a `chip-check` CLI + GitHub Action that fails loudly until the work is chipped. |
-
-Likely next: **scrub** — frame-by-frame animation inspection for agents.
+| [scrub](skills/scrub/) | Frame-by-frame UI animation inspection: drop a screen recording or GIF in chat and the agent gets stamped contact sheets, diff images, and a per-frame motion table to reason about timing, easing, and jank. Needs ffmpeg. |
 
 ## Installing a skill
 

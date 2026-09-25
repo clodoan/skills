@@ -17,3 +17,13 @@ jobs:
         with:
           node-version: 22
       - run: node --test skills/chip/scripts/chip-check.test.mjs
+
+  scrub-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - run: node --test skills/scrub/scripts/scrub.test.mjs
