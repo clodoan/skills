@@ -21,7 +21,7 @@ import process from "node:process";
 
 import {
   DEVICES, BACKGROUNDS, deviceList, frameSize, screenRect, contentRect,
-  buildDeviceHtml, buildScreenHtml,
+  buildDeviceHtml, buildScreenHtml, squirclePoints,
 } from "./devices.mjs";
 import { withBrowser, capture } from "./capture.mjs";
 import { pngSize, decodePng, getPixel, colorDistance } from "./png.mjs";
@@ -332,13 +332,48 @@ async function render3dOutput(browser, opts, shots) {
   const device0 = shots[0].device;
   const textures = [];
   const devices = [];
-  for (const { device, shot, analysis } of shots) {
+  for (const { id, device, shot, analysis } of shots) {
     textures.push(await renderScreenTexture(browser, device, shot, analysis, opts, device.dpr));
-    devices.push({
+    const screenTexIdx = textures.length - 1;
+    const geo = {
       spec: { kind: device.kind },
       ...deviceGeometry(device, { buttons: opts.buttons }),
-      texture: `/tex/${textures.length - 1}.png`,
-    });
+      texture: `/tex/${screenTexIdx}.png`,
+    };
+    // Real bezel art as the device's front face (fetched cache or
+    // --frame): the 3D front view then matches the flat composite.
+    const frameFile = findFrame(id, opts.frame);
+    if (frameFile) {
+      const frame = analyzeFrame(frameFile);
+      const s = frame.hole.width / device.pt.width;
+      textures.push(frame.buf);
+      geo.frameArt = {
+        texture: `/tex/${textures.length - 1}.png`,
+        art: { width: frame.img.width / s, height: frame.img.height / s },
+        body: {
+          x: frame.deviceBox.x / s, y: frame.deviceBox.y / s,
+          width: frame.deviceBox.width / s, height: frame.deviceBox.height / s,
+        },
+        hole: {
+          x: frame.hole.x / s, y: frame.hole.y / s,
+          width: frame.hole.width / s, height: frame.hole.height / s,
+        },
+      };
+      // Body slab silhouette = the art's own alpha contour, unshrunk:
+      // Apple's art has semi-transparent polished highlights at the
+      // corners, and every such pixel must have slab behind it or the
+      // background bleeds through as bright notches.
+      geo.outer = {
+        width: geo.frameArt.art.width,
+        height: geo.frameArt.art.height,
+        points: frame.bodyOutline.map(([px, py]) => [px / s, py / s]),
+      };
+      delete geo.plate;
+      delete geo.island;
+      delete geo.buttons;
+      delete geo.deck;
+    }
+    devices.push(geo);
   }
   const stage = flat
     ? {

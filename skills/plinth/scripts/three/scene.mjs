@@ -122,6 +122,64 @@ async function buildDevice(d) {
     return mesh;
   };
 
+  // Real bezel art mode: the official frame PNG is the device's front
+  // face (unlit, keeping the art's baked lighting), the screenshot plane
+  // sits in its cutout, and the extruded body follows the art's
+  // silhouette. The front view matches the flat composite exactly.
+  if (d.frameArt) {
+    const fa = d.frameArt;
+    // Thin slab: the art is a flat front view drawn at physical
+    // proportions, so a thick extrusion inevitably projects past the
+    // art's corner curves at yaw. A thin body keeps the silhouette true;
+    // depth reads through perspective, glass, and the contact shadow.
+    const t2 = Math.min(10, t / 4);
+    const bodyShape2 = shapeFromPoints(d.outer.points, outerH);
+    // No bevel: bevels grow outward past the art's silhouette.
+    const bodyGeo2 = new THREE.ExtrudeGeometry(bodyShape2, {
+      depth: t2, bevelEnabled: false, curveSegments: 1,
+    });
+    bodyGeo2.translate(0, 0, -t2);
+    group.add(center(new THREE.Mesh(bodyGeo2, bodyMat)));
+
+    // Coordinates are in art space: the slab outline, screen and art
+    // plane all share the art's origin.
+    const holeCx = fa.hole.x + fa.hole.width / 2;
+    const holeCy = fa.hole.y + fa.hole.height / 2;
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(fa.hole.width, fa.hole.height), screenMat);
+    screen.position.set(holeCx - outerW / 2, outerH / 2 - holeCy, 0.4);
+    group.add(screen);
+
+    const artTex = await loadTexture(fa.texture);
+    // Apple's art stores white RGB under alpha-0 margins; without
+    // premultiplied alpha, linear filtering bleeds that white into the
+    // silhouette as a bright halo.
+    artTex.premultiplyAlpha = true;
+    artTex.needsUpdate = true;
+    const artCx = fa.art.width / 2;
+    const artCy = fa.art.height / 2;
+    const art = new THREE.Mesh(
+      new THREE.PlaneGeometry(fa.art.width, fa.art.height),
+      new THREE.MeshBasicMaterial({
+        map: artTex, transparent: true, toneMapped: false, premultipliedAlpha: true,
+      }),
+    );
+    art.position.set(artCx - outerW / 2, outerH / 2 - artCy, 0.8);
+    group.add(art);
+
+    if (CONFIG.view !== "flat") {
+      const glass = new THREE.Mesh(
+        new THREE.PlaneGeometry(fa.hole.width, fa.hole.height),
+        new THREE.MeshPhysicalMaterial({
+          color: 0xffffff, metalness: 0, roughness: 0.32, transparent: true,
+          opacity: 0.035, envMapIntensity: 1.1, depthWrite: false,
+        }),
+      );
+      glass.position.set(screen.position.x, screen.position.y, 3);
+      group.add(glass);
+    }
+    return group;
+  }
+
   // Body: extruded outer squircle with beveled edges (titanium band).
   const bodyShape = shapeFromPoints(d.outer.points, outerH);
   const bevel = Math.min(4, t / 4);
