@@ -77,7 +77,9 @@ skill (MIT).
 ## Options
 
 ```
---out <dir>        output directory (default <video>-scrub)
+--out <dir>        output directory (default <video>-scrub); must be new,
+                   empty, or a previous scrub output (only scrub's own
+                   files are replaced)
 --fps <n>          override the normalized frame rate
 --grid <n>         sheet grid (default 4 = 16 cells per sheet)
 --max-frames <n>   cap on dense frames (default 96)

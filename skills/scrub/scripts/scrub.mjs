@@ -13,7 +13,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -26,6 +26,8 @@ const TRIM_PAD_FRAMES = 3;
 const CROP_MAX_COVERAGE = 0.85; // skip cropping when motion covers most of the frame
 const UPSCALE_TARGET = 320; // upscale crops until min dimension reaches this
 const MAX_UPSCALE = 4;
+// Everything scrub writes; only these are removed when reusing an output dir.
+const SCRUB_OUTPUTS = ["index.md", "overview.png", "motion.csv", "motion-curve.svg", "sheets", "work"];
 
 class UsageError extends Error {}
 
@@ -40,7 +42,8 @@ with an index.md, stamped contact sheets, difference sheets, and a
 per-frame motion table.
 
 Options:
-  --out <dir>         Output directory (default: <video>-scrub next to input)
+  --out <dir>         Output directory (default: <video>-scrub next to input);
+                      must be new, empty, or a previous scrub output
   --fps <n>           Override the normalized frame rate
   --grid <n>          Contact sheet grid (default 4 = 4x4 cells)
   --max-frames <n>    Cap on frames in dense sheets (default 96)
@@ -88,7 +91,28 @@ function parseArgs(argv) {
   }
   if (!opts.input) throw new UsageError("missing input video");
   if (!existsSync(opts.input)) throw new UsageError(`input not found: ${opts.input}`);
+  if (!statSync(opts.input).isFile()) throw new UsageError(`input is not a file: ${opts.input}`);
   return opts;
+}
+
+// Refuse any directory that holds the input or someone else's files.
+// A previous scrub output (index.md + work/) is reused by removing only
+// scrub's own files.
+function prepareOutDir(outDir, input) {
+  if (existsSync(outDir)) {
+    const rel = path.relative(realpathSync(outDir), realpathSync(input));
+    if (rel === "" || !(rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))) {
+      throw new UsageError(`output dir ${outDir} contains the input video; pass a different --out`);
+    }
+    if (!statSync(outDir).isDirectory()) throw new UsageError(`output path ${outDir} is not a directory`);
+    const entries = readdirSync(outDir);
+    const previousRun = entries.includes("index.md") && entries.includes("work");
+    if (entries.length > 0 && !previousRun) {
+      throw new UsageError(`output dir ${outDir} is not empty and is not a previous scrub output; pass a new or empty --out`);
+    }
+    for (const name of SCRUB_OUTPUTS) rmSync(path.join(outDir, name), { recursive: true, force: true });
+  }
+  mkdirSync(path.join(outDir, "work"), { recursive: true });
 }
 
 function checkTools() {
@@ -482,8 +506,7 @@ function main() {
 
   const outDir = path.resolve(opts.out ?? `${opts.input.replace(/\.[^./]+$/, "")}-scrub`);
   const workDir = path.join(outDir, "work");
-  rmSync(outDir, { recursive: true, force: true });
-  mkdirSync(workDir, { recursive: true });
+  prepareOutDir(outDir, opts.input);
 
   console.log(`scrub · probing ${opts.input}`);
   const meta = probe(opts.input);
