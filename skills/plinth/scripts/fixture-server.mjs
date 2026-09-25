@@ -1,6 +1,7 @@
 /**
  * Test fixture server: red hero (purple in dark mode), yellow fixed
- * cookie banner, tall gradient body. Runs as a separate process because
+ * cookie banner, tall gradient body; /csp serves it with a strict CSP,
+ * /probe reports the page's UA and input capabilities. Runs as a separate process because
  * the test process blocks its event loop while the CLI runs.
  * Prints "listening <port>" on stdout.
  */
@@ -22,8 +23,26 @@ const FIXTURE = `<!doctype html><html><head><meta charset="utf-8"><style>
 <div class="banner" id="cookie"></div>
 <div class="marker-top"></div><div class="marker-bottom"></div></body></html>`;
 
+// /probe reports what the page sees (no viewport meta on purpose) to
+// /log, which is echoed on stdout as "log <json>" for the tests to read.
+const PROBE = `<!doctype html><body style="margin:0;background:#fff"><script>
+fetch("/log?" + new URLSearchParams({
+  tag: location.search.slice(1), ua: navigator.userAgent, width: innerWidth,
+  touchPoints: navigator.maxTouchPoints, coarse: matchMedia("(pointer: coarse)").matches,
+}));
+</script>`;
+
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { "content-type": "text/html" });
-  res.end(FIXTURE);
+  const url = new URL(req.url, "http://fixture");
+  if (url.pathname === "/log") {
+    console.log(`log ${JSON.stringify(Object.fromEntries(url.searchParams))}`);
+    res.end();
+    return;
+  }
+  const headers = { "content-type": "text/html" };
+  // Strict CSP: inline styles (like --hide's) are blocked unless bypassed.
+  if (url.pathname === "/csp") headers["content-security-policy"] = "style-src 'self'";
+  res.writeHead(200, headers);
+  res.end(url.pathname === "/probe" ? PROBE : FIXTURE);
 });
 server.listen(0, () => console.log(`listening ${server.address().port}`));

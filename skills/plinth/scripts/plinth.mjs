@@ -315,7 +315,7 @@ function verifySingle({ shot, out, device, opts, analysis }) {
 async function renderScroll(browser, opts, device, outFile) {
   const cr = contentRect(device, opts.mode);
   const shot = await capture(browser, opts.url, {
-    viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
+    device, viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
     dark: opts.dark, hide: opts.hide, waitMs: opts.wait, fullPage: true,
   });
   const analysis = analyzeCapture(shot.buffer);
@@ -387,7 +387,7 @@ async function main() {
       const cr = contentRect(device, opts.mode);
       console.log(`plinth · capturing ${opts.url} as ${id} (${cr.width}×${cr.height}pt @${device.dpr}x, mode ${device.kind === "phone" || device.kind === "tablet" ? opts.mode : "n/a"})`);
       const shot = await capture(browser, opts.url, {
-        viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
+        device, viewport: { width: cr.width, height: cr.height }, dpr: device.dpr,
         dark: opts.dark, hide: opts.hide, waitMs: opts.wait,
       });
       shots.push({ id, device, shot, analysis: analyzeCapture(shot.buffer) });

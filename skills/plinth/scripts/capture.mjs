@@ -53,23 +53,48 @@ export async function withBrowser(fn) {
   }
 }
 
+// Headless Chrome advertises "HeadlessChrome" in its UA, which bot walls
+// (e.g. Cloudflare on x.ai) block outright. Present the UA of the device
+// being framed instead; Chrome versions come from the running browser.
+// iOS 18 matches the chrome plinth draws. iPadOS Safari requests desktop
+// sites by default, so the iPad sends the Mac Safari UA (plus touch).
+const IOS = "18_0";
+const SAFARI = "18.0";
+
+function userAgent(browser, device) {
+  const chrome = `Chrome/${browser.version().split(".")[0]}.0.0.0`;
+  if (device.os === "ios" && device.kind === "phone") {
+    return `Mozilla/5.0 (iPhone; CPU iPhone OS ${IOS} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${SAFARI} Mobile/15E148 Safari/604.1`;
+  }
+  if (device.os === "ios") {
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${SAFARI} Safari/605.1.15`;
+  }
+  if (device.os === "android") {
+    return `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) ${chrome} Mobile Safari/537.36`;
+  }
+  return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ${chrome} Safari/537.36`;
+}
+
 /**
  * Capture one screenshot. Returns { buffer, pxWidth, pxHeight }.
- * options: { viewport, dpr, dark, hide[], waitMs, fullPage, media }
+ * options: { device, viewport, dpr, dark, hide[], waitMs, fullPage }
+ *
+ * Phones and tablets get touch input (coarse pointer, touch points) but
+ * not Playwright's isMobile: isMobile honors <meta viewport>, and a page
+ * without one lays out at 980px and zooms out, which breaks DPR-exact
+ * capture (one row short) and full-page scroll captures (2.4× wide).
+ * Pages therefore always lay out at the device width.
  */
-// Headless Chrome advertises "HeadlessChrome" in its UA, which bot walls
-// (e.g. Cloudflare on x.ai) block outright. Present the equivalent
-// stable-Chrome UA instead — same engine, honest version.
-const CHROME_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
 export async function capture(browser, url, opts) {
   const context = await browser.newContext({
     viewport: opts.viewport,
     deviceScaleFactor: opts.dpr,
     colorScheme: opts.dark ? "dark" : "light",
     reducedMotion: "reduce",
-    userAgent: CHROME_UA,
+    userAgent: userAgent(browser, opts.device),
+    hasTouch: opts.device.kind === "phone" || opts.device.kind === "tablet",
+    // --hide injects a <style>; strict style-src CSPs would block it.
+    bypassCSP: true,
   });
   const page = await context.newPage();
   try {

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEVICES, frameSize, screenRect, contentRect } from "./devices.mjs";
 import { decodePng, getPixel, pngSize, colorDistance } from "./png.mjs";
-import { browserAvailable } from "./capture.mjs";
+import { browserAvailable, withBrowser } from "./capture.mjs";
 
 const CLI = fileURLToPath(new URL("./plinth.mjs", import.meta.url));
 const PAD = 48;
@@ -31,6 +31,7 @@ const opts = { skip: hasBrowser || requireBrowser ? false : "no browser (install
 let server;
 let baseUrl;
 let dir;
+const probeLogs = [];
 
 before(async () => {
   dir = mkdtempSync(path.join(tmpdir(), "plinth-test-"));
@@ -40,7 +41,11 @@ before(async () => {
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("fixture server did not start")), 10000);
     server.stdout.on("data", (chunk) => {
-      const m = chunk.toString().match(/listening (\d+)/);
+      const text = chunk.toString();
+      for (const line of text.split("\n")) {
+        if (line.startsWith("log ")) probeLogs.push(JSON.parse(line.slice(4)));
+      }
+      const m = text.match(/listening (\d+)/);
       if (m) { clearTimeout(timer); resolve(Number(m[1])); }
     });
   });
@@ -340,4 +345,45 @@ test("--buttons on Pixel draws right-side buttons only", opts, () => {
   const w = frameSize(d).width;
   assert.equal(diffColumns(plain.img, btn.img, d, -3, w - 1), 0, "left side or frame changed");
   assert.ok(diffColumns(plain.img, btn.img, d, w - 1, w + 3) > 0, "right-side buttons missing");
+});
+
+async function probe(device) {
+  const res = runPlinth([`${baseUrl}/probe?${device}`, "--device", device, "--wait", "300", "--out", path.join(dir, `probe-${device}.png`)]);
+  assert.equal(res.code, 0, res.out);
+  // The beacon lands on the server's stdout asynchronously.
+  for (let i = 0; i < 50 && !probeLogs.some((l) => l.tag === device); i++) await new Promise((r) => setTimeout(r, 100));
+  const log = probeLogs.find((l) => l.tag === device);
+  assert.ok(log, `no probe report for ${device}`);
+  return { ...log, out: res.out };
+}
+
+test("phones capture as a touch device with a mobile UA, at exact device width", opts, async () => {
+  const iphone = await probe("iphone-16-pro");
+  assert.match(iphone.ua, /\(iPhone; CPU iPhone OS [\d_]+ like Mac OS X\).* Mobile\/\w+ Safari\//);
+  assert.equal(iphone.coarse, "true");
+  assert.ok(Number(iphone.touchPoints) > 0);
+  // No viewport meta on the probe page: layout still at the device width.
+  assert.equal(iphone.width, "402");
+  assert.match(iphone.out, /capture is DPR-exact \(safe-area viewport\) — ok/);
+
+  const pixel = await probe("pixel-8");
+  assert.match(pixel.ua, /\(Linux; Android [^)]*\).* Chrome\/\d+\.0\.0\.0 Mobile Safari\//);
+  assert.equal(pixel.coarse, "true");
+});
+
+test("desktop frames present the browser's own Chrome version, not a headless or stale one", opts, async () => {
+  const major = await withBrowser(async (b) => b.version().split(".")[0]);
+  const desktop = await probe("browser");
+  assert.doesNotMatch(desktop.ua, /Headless|Mobile/);
+  assert.match(desktop.ua, new RegExp(`Chrome/${major}\\.0\\.0\\.0 Safari/`));
+  assert.equal(desktop.coarse, "false");
+});
+
+test("--hide works on pages with a strict Content-Security-Policy", opts, () => {
+  const d = DEVICES.browser;
+  const res = runPlinth([`${baseUrl}/csp`, "--device", "browser", "--hide", "#cookie", "--out", path.join(dir, "csp.png")]);
+  assert.equal(res.code, 0, res.out);
+  const img = decodePng(readFileSync(path.join(dir, "csp.png")));
+  const bannerY = contentRect(d, "standalone").height - 34;
+  assert.ok(colorDistance(pixelAt(img, d, d.pt.width / 2, bannerY), HERO) <= 8, "banner should be hidden");
 });
