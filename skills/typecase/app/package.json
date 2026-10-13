@@ -1,0 +1,29 @@
+{
+  "name": "typecase-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Typecase desktop reader — the case your agent skills live in",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "playwright test",
+    "dist": "electron-builder --mac --dir"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.clodoan.typecase",
+    "productName": "Typecase",
+    "directories": { "output": "dist" },
+    "files": ["main.mjs", "preload.cjs", "renderer/**", "../scripts/lib/**"],
+    "mac": {
+      "target": "dir",
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    }
+  }
+}
