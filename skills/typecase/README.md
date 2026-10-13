@@ -11,7 +11,7 @@ structured record, and gives you three layers on top:
 3. **A lockfile and changelog** — `lock`, `diff`, `pin`, and a running
    `TYPECASE.md` with one plain-language paragraph per skill change.
 
-<img src="assets/hero.png" alt="Typecase app: specimen grid of installed skills and the detail view of one skill" width="100%" />
+<img src="assets/hero.png" alt="Typecase app: compact row list of installed skills and the detail view of one skill" width="100%" />
 
 *All screenshots show public open-source skill packs only (Anthropic's
 [skills](https://github.com/anthropics/skills), Figma's
@@ -123,14 +123,14 @@ navigation, ⌘K search). It imports the same parser library as the CLI —
 no duplicated parsing logic — and live-reloads when any skill folder
 changes on disk.
 
-<img src="assets/app-grid-dark.png" alt="Typecase app in dark mode: specimen card grid" width="100%" />
+<img src="assets/app-rows-dark.png" alt="Typecase app in dark mode: compact row list" width="100%" />
 
 - **Sidebar** — Library (All, Active, Changed since lock, Overlaps),
   Tools, Collections (one per skill root), Sources (user / project /
   plugin scope).
-- **Specimen grid** — each card leads with the skill name, one-line
-  description, and tool · scope · token size, with duplicate / overlap /
-  risky / changed badges. Grid or list, two densities.
+- **Row list** — one compact hairline row per skill: name, one-line
+  description, duplicate / overlap / risky / changed badges, tool ·
+  scope, token size. Two densities; arrow-key navigation.
 - **Detail view** — hairline rows for triggers, when (not) to use, tools
   it can call with risky flags, files referenced, path (Reveal in
   Finder / Open in Cursor), overlaps, and lock state; an info button
@@ -141,7 +141,7 @@ changes on disk.
 
 <img src="assets/app-history-light.png" alt="History tab showing a real since-lock diff of the frontend-design skill" width="100%" />
 <img src="assets/app-search-light.png" alt="Command-K fuzzy search palette" width="100%" />
-<img src="assets/app-grid-accent.png" alt="Accent canvas theme" width="100%" />
+<img src="assets/app-rows-accent.png" alt="Accent canvas theme" width="100%" />
 
 Run it in development:
 

@@ -196,46 +196,42 @@ body.mac { background: transparent; } /* let window vibrancy show through */
 .count-head h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
 .count-head .sub { color: var(--ink-3); font-size: 12px; }
 
-/* Specimen grid */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 14px; }
-.grid.compact { grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 10px; }
-
-.card {
-  position: relative;
-  border-radius: var(--radius-card);
-  background: var(--card);
-  border: 0.5px solid var(--hairline);
-  box-shadow: var(--shadow);
-  padding: 18px 16px 14px;
-  min-height: 150px;
-  display: flex; flex-direction: column;
-  transition: transform var(--t-fast) var(--spring), box-shadow var(--t-fast) var(--spring);
+/* Compact skill rows */
+.rows-list { border-top: 0.5px solid var(--hairline); }
+.skill-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 9px 10px;
+  margin: 0 -10px;
+  border-bottom: 0.5px solid var(--hairline);
+  border-radius: 7px;
   outline: none;
 }
-.grid.compact .card { min-height: 118px; padding: 14px 13px 11px; }
-.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-float); }
-.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.card.focused { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* Note: clamped boxes use margins, not padding — webkit-box clipping
-   lets clipped lines show through padding. */
-.card .hero {
-  flex: 1;
-  font-size: 21px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.12;
-  overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-  margin-bottom: 10px;
+.rows-list.compact .skill-row { padding: 5px 10px; }
+.skill-row:hover { background: var(--hover); }
+.skill-row:focus-visible, .skill-row.focused { background: var(--active-row); }
+.skill-row .r-name {
+  flex: none; width: 218px;
+  font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.grid.compact .card .hero { font-size: 16.5px; -webkit-line-clamp: 2; }
-.card .desc {
-  color: var(--ink-2); font-size: 11.5px; line-height: 1.35;
-  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;
-  margin-bottom: 8px;
+.rows-list.compact .skill-row .r-name { font-size: 12px; }
+.skill-row .r-desc {
+  flex: 1; min-width: 0;
+  color: var(--ink-2); font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.card .meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--ink-3); }
-.card .meta .tool-tag { display: inline-flex; align-items: center; gap: 4px; }
-.card .meta svg { opacity: 0.8; }
-.card .badges { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; }
+.skill-row .r-badges { flex: none; display: flex; gap: 4px; }
+.skill-row .r-tool {
+  flex: none; width: 138px;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden;
+}
+.skill-row .r-tool svg { flex: none; opacity: 0.8; }
+.skill-row .r-tok {
+  flex: none; width: 52px; text-align: right;
+  font-size: 10.5px; color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
 
 .badge {
   font-size: 9.5px; font-weight: 600; letter-spacing: 0.03em;
@@ -245,14 +241,6 @@ body.mac { background: transparent; } /* let window vibrancy show through */
 .badge.risky { background: var(--warn-bg); color: var(--danger); }
 .badge.dup, .badge.overlap { background: var(--accent); color: var(--accent-ink); }
 .badge.changed { background: var(--accent); color: var(--accent-ink); }
-
-/* List layout */
-.list .card { min-height: 0; flex-direction: row; align-items: center; gap: 14px; padding: 10px 14px; }
-.list { display: flex; flex-direction: column; gap: 8px; }
-.list .card .hero { flex: none; width: 240px; font-size: 15px; -webkit-line-clamp: 1; padding: 0; }
-.list .card .desc { flex: 1; -webkit-line-clamp: 1; padding: 0; }
-.list .card .meta { flex: none; }
-.list .card .badges { position: static; margin-left: 8px; order: 10; }
 
 /* ---- Detail view ---- */
 .detail { max-width: 760px; margin: 0 auto; }

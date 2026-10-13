@@ -73,10 +73,10 @@ test.afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test("grid renders every fixture skill with count and badges", async () => {
-  await expect(page.locator(".card")).toHaveCount(2);
+test("row list renders every fixture skill with count and badges", async () => {
+  await expect(page.locator(".skill-row")).toHaveCount(2);
   await expect(page.locator(".count-head h1")).toHaveText("2 Skills");
-  await expect(page.locator(".card", { hasText: "alpha-review" }).locator(".badge.changed")).toBeVisible();
+  await expect(page.locator(".skill-row", { hasText: "alpha-review" }).locator(".badge.changed")).toBeVisible();
 });
 
 test("search palette finds and opens a skill", async () => {
@@ -90,17 +90,17 @@ test("search palette finds and opens a skill", async () => {
 });
 
 test("History tab shows the plain-language change paragraph", async () => {
-  await page.keyboard.press("Escape"); // back to grid
-  await page.locator(".card", { hasText: "alpha-review" }).click();
+  await page.keyboard.press("Escape"); // back to the row list
+  await page.locator(".skill-row", { hasText: "alpha-review" }).click();
   await expect(page.locator(".detail-hero")).toHaveText("alpha-review");
   await page.locator('#segmented button[data-tab="history"]').click();
   await expect(page.locator(".history-entry .para").first()).toContainText("Escalation");
   await expect(page.locator(".diff-list li.added")).toContainText("Escalation");
 });
 
-test("sidebar tool filter narrows the grid", async () => {
+test("sidebar tool filter narrows the row list", async () => {
   await page.keyboard.press("Escape");
   await page.locator(".nav-item", { hasText: "Claude Code" }).click();
-  await expect(page.locator(".card")).toHaveCount(1);
-  await expect(page.locator(".card .hero")).toHaveText("beta-notes");
+  await expect(page.locator(".skill-row")).toHaveCount(1);
+  await expect(page.locator(".skill-row .r-name")).toHaveText("beta-notes");
 });

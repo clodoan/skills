@@ -35,7 +35,6 @@ const state = {
   scope: null,
   collection: null,     // root dir
   chips: { risky: false, overlaps: false, changed: false },
-  layout: "grid",
   density: "cozy",
   theme: localStorage.getItem("typecase-theme") ||
     (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
@@ -186,11 +185,11 @@ function renderSidebar() {
   }
 }
 
-/* ---------- grid ---------- */
+/* ---------- rows ---------- */
 
 function toolLabel(id) { return TOOLS.find((t) => t.id === id)?.label ?? id; }
 
-function cardBadges(s) {
+function rowBadges(s) {
   const changed = changedKeys();
   const overlaps = overlapNames();
   const dups = dupNames();
@@ -202,7 +201,7 @@ function cardBadges(s) {
   return out.join("");
 }
 
-function renderGrid() {
+function renderRows() {
   const content = $("#content");
   const skills = visibleSkills().sort((a, b) => a.name.localeCompare(b.name));
   const scopeLabel =
@@ -219,36 +218,32 @@ function renderGrid() {
       <h1>${skills.length} Skill${skills.length === 1 ? "" : "s"}</h1>
       <span class="sub">${esc(scopeLabel)}</span>
     </div>`;
-  const grid = document.createElement("div");
-  grid.className = (state.layout === "list" ? "list" : "grid") + (state.density === "compact" ? " compact" : "");
-  grid.id = "grid";
+  const list = document.createElement("div");
+  list.className = "rows-list" + (state.density === "compact" ? " compact" : "");
+  list.id = "rows";
 
   skills.forEach((s, i) => {
-    const card = document.createElement("article");
-    card.className = "card" + (i === state.focusIndex ? " focused" : "");
-    card.tabIndex = 0;
-    card.dataset.key = keyOf(s);
-    if (i === state.focusIndex) card.style.viewTransitionName = "hero";
-    card.innerHTML = `
-      <div class="badges">${cardBadges(s)}</div>
-      <div class="hero">${esc(s.name)}</div>
-      <div class="desc">${esc(s.description || "—")}</div>
-      <div class="meta">
-        <span class="tool-tag">${TOOL_ICONS[s.tool] ?? ""} ${esc(toolLabel(s.tool))}</span>
-        <span>·</span><span>${esc(s.scope)}</span>
-        <span>·</span><span>~${s.tokens} tok</span>
-      </div>`;
-    const open = () => openDetail(keyOf(s), card);
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
-    grid.appendChild(card);
+    const row = document.createElement("div");
+    row.className = "skill-row" + (i === state.focusIndex ? " focused" : "");
+    row.tabIndex = 0;
+    row.dataset.key = keyOf(s);
+    row.innerHTML = `
+      <span class="r-name">${esc(s.name)}</span>
+      <span class="r-desc">${esc(s.description || "—")}</span>
+      <span class="r-badges">${rowBadges(s)}</span>
+      <span class="r-tool">${TOOL_ICONS[s.tool] ?? ""}<span>${esc(toolLabel(s.tool))} · ${esc(s.scope)}</span></span>
+      <span class="r-tok">~${s.tokens}</span>`;
+    const open = () => openDetail(keyOf(s), row.querySelector(".r-name"));
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+    list.appendChild(row);
   });
   if (!skills.length) {
-    grid.innerHTML = `<div class="empty-hint">Nothing here. ${
+    list.innerHTML = `<div class="empty-hint">Nothing here. ${
       state.library === "changed" ? "Run <code>typecase lock</code>, edit a skill, and changes will appear." : "Try clearing filters."
     }</div>`;
   }
-  wrap.appendChild(grid);
+  wrap.appendChild(list);
   content.replaceChildren(wrap);
   $("#segmented-wrap").hidden = true;
 }
@@ -299,7 +294,7 @@ function renderDetail() {
     </div>
     <div class="detail-hero" style="view-transition-name: hero">${esc(s.name)}</div>
     <div class="detail-sub">${esc(s.description || "")}</div>
-    <div class="detail-badges">${cardBadges(s)}</div>
+    <div class="detail-badges">${rowBadges(s)}</div>
     ${state.showFrontmatter ? `<div class="frontmatter-pop">${esc(JSON.stringify(s.frontmatter, null, 2))}</div>` : ""}
     <div id="tab-body"></div>`;
   content.replaceChildren(el);
@@ -422,21 +417,12 @@ function renderTabHistory(body, s, { lockEntry, change }) {
 
 /* ---------- keyboard ---------- */
 
-function gridColumns() {
-  const cards = document.querySelectorAll("#grid .card");
-  if (cards.length < 2) return 1;
-  const top0 = cards[0].offsetTop;
-  let n = 1;
-  while (n < cards.length && cards[n].offsetTop === top0) n++;
-  return n;
-}
-
 function moveFocus(delta) {
-  const cards = [...document.querySelectorAll("#grid .card")];
-  if (!cards.length) return;
-  state.focusIndex = Math.max(0, Math.min(cards.length - 1, (state.focusIndex < 0 ? 0 : state.focusIndex + delta)));
-  cards.forEach((c, i) => c.classList.toggle("focused", i === state.focusIndex));
-  cards[state.focusIndex].scrollIntoView({ block: "nearest", behavior: prefersReduced ? "auto" : "smooth" });
+  const rows = [...document.querySelectorAll("#rows .skill-row")];
+  if (!rows.length) return;
+  state.focusIndex = Math.max(0, Math.min(rows.length - 1, (state.focusIndex < 0 ? 0 : state.focusIndex + delta)));
+  rows.forEach((r, i) => r.classList.toggle("focused", i === state.focusIndex));
+  rows[state.focusIndex].scrollIntoView({ block: "nearest", behavior: prefersReduced ? "auto" : "smooth" });
 }
 
 document.addEventListener("keydown", (e) => {
@@ -456,14 +442,11 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.target.tagName === "INPUT") return;
-  const cols = gridColumns();
-  if (e.key === "ArrowRight") { e.preventDefault(); moveFocus(1); }
-  else if (e.key === "ArrowLeft") { e.preventDefault(); moveFocus(-1); }
-  else if (e.key === "ArrowDown") { e.preventDefault(); moveFocus(cols); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(-cols); }
+  if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); moveFocus(1); }
+  else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); moveFocus(-1); }
   else if (e.key === "Enter" && state.focusIndex >= 0) {
-    const card = document.querySelectorAll("#grid .card")[state.focusIndex];
-    if (card) openDetail(card.dataset.key, card);
+    const row = document.querySelectorAll("#rows .skill-row")[state.focusIndex];
+    if (row) openDetail(row.dataset.key, row.querySelector(".r-name"));
   }
 });
 
@@ -526,8 +509,6 @@ $("#density-btn").addEventListener("click", () => {
   $("#density-btn").classList.toggle("active", state.density === "compact");
   render();
 });
-for (const b of document.querySelectorAll("#layout-group .tb-btn"))
-  b.addEventListener("click", () => { state.layout = b.dataset.layout; render(); });
 for (const b of document.querySelectorAll(".chip"))
   b.addEventListener("click", () => {
     state.chips[b.dataset.chip] = !state.chips[b.dataset.chip];
@@ -543,11 +524,9 @@ for (const b of document.querySelectorAll("#segmented button"))
 /* ---------- render root ---------- */
 
 function render() {
-  for (const b of document.querySelectorAll("#layout-group .tb-btn"))
-    b.classList.toggle("active", b.dataset.layout === state.layout);
   renderSidebar();
   if (state.view === "detail") renderDetail();
-  else renderGrid();
+  else renderRows();
 }
 
 async function load() {
