@@ -17,6 +17,7 @@ and any scripts it ships.
 | [scrub](skills/scrub/) | Frame-by-frame UI animation inspection: drop a screen recording or GIF in chat and the agent gets stamped contact sheets, diff images, and a per-frame motion table to reason about timing, easing, and jank. Needs ffmpeg. |
 | [plinth](skills/plinth/) | Device-framed, DPR-correct screenshots of a running app or URL (phone/tablet/laptop/browser frames, generated CSS, no vendor artwork) with self-verifying dimensions and alignment; optional scrolled mp4/gif. Needs Chrome; ffmpeg for video. |
 | [ramble](skills/ramble/) | Mermaid flow diagrams of the screens already in your codebase: walks Next.js app/pages and React Router plus link/redirect call sites; dynamic params labeled, redirect edges dashed, unresolved navigations reported. Optional screenshot mode via plinth. Zero deps. |
+| [statesheet](skills/statesheet/) | React component state you can see and audit: mounts a component in every declared state with Playwright (no Storybook) and renders state × viewport × light/dark into one pixel-verified contact sheet; finds boolean state piles (`isLoading && !error && …`) and proposes a reducer with an explicit transition table. Needs Chrome. |
 
 ## Installing a skill
 
