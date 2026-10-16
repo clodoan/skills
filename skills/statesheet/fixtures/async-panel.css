@@ -1,0 +1,107 @@
+:root {
+  --ap-bg: #ffffff;
+  --ap-fg: #15181d;
+  --ap-muted: #667085;
+  --ap-line: #e4e7ec;
+  --ap-chip: #f2f4f7;
+  --ap-accent: #4458e8;
+  --ap-danger-bg: #fef3f2;
+  --ap-danger-fg: #b42318;
+  --ap-live: #087443;
+  --ap-live-bg: #e7f6ef;
+  --ap-building: #93540b;
+  --ap-building-bg: #fdf3e3;
+  --ap-failed: #b42318;
+  --ap-failed-bg: #fdeceb;
+}
+
+.dark {
+  --ap-bg: #16181d;
+  --ap-fg: #eceef2;
+  --ap-muted: #98a2b3;
+  --ap-line: #2b2f37;
+  --ap-chip: #22252c;
+  --ap-accent: #8296ff;
+  --ap-danger-bg: #2a1715;
+  --ap-danger-fg: #f9968b;
+  --ap-live: #5bd49d;
+  --ap-live-bg: #11291e;
+  --ap-building: #ecb35e;
+  --ap-building-bg: #2d2211;
+  --ap-failed: #f9968b;
+  --ap-failed-bg: #2a1715;
+}
+
+.ap-card {
+  box-sizing: border-box;
+  max-width: 560px;
+  border: 1px solid var(--ap-line);
+  border-radius: 12px;
+  background: var(--ap-bg);
+  color: var(--ap-fg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.ap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ap-line);
+}
+.ap-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.ap-refresh {
+  font: inherit; font-size: 13px; color: var(--ap-accent);
+  background: none; border: 1px solid var(--ap-line); border-radius: 8px;
+  padding: 4px 10px;
+}
+.ap-refresh:disabled { opacity: 0.45; }
+
+.ap-list { list-style: none; margin: 0; padding: 0; }
+.ap-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--ap-line);
+}
+.ap-row:last-child { border-bottom: none; }
+.ap-name { font-weight: 550; flex: 1; }
+.ap-env {
+  color: var(--ap-muted); font-size: 12px;
+  background: var(--ap-chip); border-radius: 6px; padding: 2px 8px;
+}
+.ap-badge {
+  font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 10px;
+  text-transform: capitalize;
+}
+.ap-badge-live { color: var(--ap-live); background: var(--ap-live-bg); }
+.ap-badge-building { color: var(--ap-building); background: var(--ap-building-bg); }
+.ap-badge-failed { color: var(--ap-failed); background: var(--ap-failed-bg); }
+
+.ap-skeleton { pointer-events: none; }
+.ap-bone {
+  display: inline-block; height: 12px; border-radius: 6px;
+  background: var(--ap-chip);
+}
+.ap-bone-name { width: 38%; }
+.ap-bone-env { width: 18%; margin-left: auto; }
+.ap-bone-badge { width: 14%; }
+
+.ap-error {
+  display: grid; gap: 8px; justify-items: start;
+  margin: 16px; padding: 14px 16px;
+  background: var(--ap-danger-bg); color: var(--ap-danger-fg);
+  border-radius: 10px; font-size: 13px;
+}
+.ap-error button {
+  font: inherit; font-weight: 600; color: inherit;
+  background: none; border: 1px solid currentColor; border-radius: 8px;
+  padding: 4px 12px;
+}
+
+.ap-empty { padding: 28px 16px; text-align: center; color: var(--ap-muted); }
+.ap-empty p { margin: 0 0 12px; }
+.ap-empty button {
+  font: inherit; font-size: 13px; font-weight: 600; color: #fff;
+  background: var(--ap-accent); border: none; border-radius: 8px;
+  padding: 7px 14px;
+}
